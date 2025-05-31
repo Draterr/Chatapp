@@ -1,0 +1,3 @@
+chatapp/*
+**/__pycache__/*
+.env
