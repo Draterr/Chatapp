@@ -32,3 +32,4 @@ CREATE TABLE messages(
   status ENUM('DELIVERED','NOT-DELIVERED') NOT NULL,
   PRIMARY KEY(id)
 );
+

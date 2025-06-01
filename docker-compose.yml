@@ -1,18 +1,19 @@
 services:
-  backend:
-    build:
-      context: ./app
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    command: "ls /app"
-    volumes:
-      - type: bind
-        source: /home/drater/Documents/Chatapp/app
-        target: /app
+  # backend:
+  #   build:
+  #     context: ./app
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - type: bind
+  #       source: /home/drater/Documents/Chatapp/app
+  #       target: /app
   mysql_db:
-    env_file: .env
-    image: "db_image"
+    env_file: ./app/.env
+    build:
+      context: ./database
+      dockerfile: Dockerfile
     ports:
       - "3307:3306"
     volumes:
@@ -21,4 +22,3 @@ services:
         target: /var/lib/mysql
 volumes:
   chatapp-db:
-    external: true
