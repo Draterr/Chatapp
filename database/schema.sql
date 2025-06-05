@@ -3,10 +3,10 @@ CREATE DATABASE chatapp;
 USE chatapp;
 CREATE Table users (
   user_id int AUTO_INCREMENT,
-  username varchar(255) NOT NULL,
+  username varchar(255) NOT NULL UNIQUE,
   password varchar(72) NOT NULL,
   role ENUM('admin','user') NOT NULL,
-  display_name varchar(255) NOT NULL,
+  display_name varchar(255) NOT NULL UNIQUE,
   avatar_url varchar(2083),
   PRIMARY KEY(user_id)
 );

@@ -3,6 +3,7 @@ import aiomysql
 from typing import *
 from dotenv import load_dotenv
 import os
+from passlib.hash import bcrypt
 
 load_dotenv()
 user = os.getenv("DB_USER")
@@ -26,17 +27,29 @@ class Database:
                                                minsize=min_pool_size,
                                                maxsize=max_pool_size,
                                                )
-    async def fetchall_query(self,query):
+    async def get_all_users(self):
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query)
+                await cur.execute("SELECT * FROM users")
                 res = await cur.fetchall()
                 return res
 
-    async def insert_query(self,query):
+    async def check_credentials(self,username:str,password:str):
+        prepared_query = "SELECT password FROM users WHERE username= %s"
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query)
+                await cur.execute(prepared_query,username)
+                stored_password = await cur.fetchone()[2] #fetchone returns tuple 2nd element is password hash
+                if stored_password:
+                    return bcrypt.verify(password,stored_password)
+                return "Not Found"
+
+    async def insert_user(self,username:str,password:str,role:str,display_name:str):
+        prepared_query = "INSERT INTO users(username,password,role,display_name) VALUES(%s,%s,%s,%s)"
+        hashed_password = bcrypt.using(rounds=12).hash(password)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(prepared_query,(username,hashed_password,role,display_name))
                 await conn.commit()
     
 

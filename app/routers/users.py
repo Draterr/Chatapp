@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Cookie, Response
 from pydantic import BaseModel
 import asyncio
 from app.db import connection
@@ -17,6 +17,20 @@ class Profile(BaseModel):
 async def register(user: User):
     #everyone user is a user by default
     role = "user"
-    query = f"INSERT INTO users(username,password,role,display_name) VALUES ('{user.username}','{user.password}','{role}','{user.username}')"
-    return await connection.insert_query(query)
+    return await connection.insert_query(user.username,user.password,role,user.username)
+
+async def login(user: User,response: Response):
+    valid = await connection.check_credentials(user.username,user.password)
+    #assign cookie
+    if valid:
+       response.set_cookie(key="session",value="")
+    elif valid == "Not Found":
+        return "Couldn't find this username"
+    elif not valid:
+        return "incorrect username or password."
+
+
+@router.get("/all_users",tags=["users"])
+async def all():
+    return await connection.get_all_users()
 
