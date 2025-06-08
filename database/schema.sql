@@ -12,24 +12,27 @@ CREATE Table users (
 );
 
 CREATE Table chats (
-  chat_id char(36) ,
+  chat_id char(36),
   chat_name VARCHAR(255),
   PRIMARY KEY(chat_id)
 );
 
 CREATE TABLE chat_users(
-  chat_id CHAR(36) ,
+  chat_id char(36),
   user_id int,
-  PRIMARY KEY(chat_id,user_id)
+  PRIMARY KEY(chat_id,user_id),
+  FOREIGN KEY(user_id) REFERENCES users(user_id),
+  FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
 );
 
 CREATE TABLE messages(
   id int,
   sent_by int NOT NULL,
   time_sent TIMESTAMP NOT NULL,
-  chat_id int NOT NULL,
+  chat_id char(36) NOT NULL,
   content TEXT(2048) NOT NULL,
   status ENUM('DELIVERED','NOT-DELIVERED') NOT NULL,
-  PRIMARY KEY(id)
+  PRIMARY KEY(id),
+  FOREIGN KEY(sent_by) REFERENCES users(user_id),
+  FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
 );
-

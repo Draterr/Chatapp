@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv() #load the environment variables in the main module so that all the child modules can have access to the env
 from fastapi import FastAPI
 from pydantic import BaseModel
 from app.routers import users

@@ -2,3 +2,4 @@ chatapp/*
 **/__pycache__/*
 .env
 init-db.sql
+venv/*
