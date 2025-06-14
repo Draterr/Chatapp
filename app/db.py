@@ -1,14 +1,18 @@
-import asyncio 
+import asyncio
 import aiomysql
 from typing import *
 import os
 from passlib.hash import bcrypt
+import logging
 
 
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
 host = os.getenv("DB_HOST")
 database = os.getenv("DB_DATABASE")
+log = logging.getLogger(__name__)
+logging.basicConfig(filename="log.log",encoding="utf-8",level=logging.DEBUG)
+
 class Database:
     def __init__(self,user: str|None,password:str|None,database:str|None,host:str|None):
         self.user = user
@@ -17,7 +21,8 @@ class Database:
         self.host = host
 
     async def initialize_connection(self,min_pool_size:int ,max_pool_size:int):
-        self.pool = await aiomysql.create_pool(host=self.host,
+        try:
+            self.pool = await aiomysql.create_pool(host=self.host,
                                                user=self.user,
                                                password=self.password,
                                                port=3307,
@@ -25,6 +30,8 @@ class Database:
                                                minsize=min_pool_size,
                                                maxsize=max_pool_size,
                                                )
+        except Exception as e:
+            log.warning(e)
 
     async def check_credentials(self,username:str,password:str):
         prepared_query = "SELECT password,role,user_id FROM users WHERE username= %s"
@@ -48,6 +55,29 @@ class Database:
                     await conn.commit()
                 except aiomysql.IntegrityError:
                     return "duplicate"
-    
+
+    async def insert_message(self,sender_id:int,time_sent,chat_id:str,message:str,status:str):
+        prepared_query = "INSERT INTO messages(sent_by,time_sent,chat_id,content,status) VALUES(%s,%s,%s,%s,%s)"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                try:
+                    await cur.execute(prepared_query,(sender_id,time_sent,chat_id,message,status))
+                    await conn.commit()
+                    return f"Inserted message {sender_id} to {chat_id}"
+                except Exception as e:
+                    log.warning(e)
+                    return e
+
+    async def insert_chat(self,chat_id:str,chat_name:str):
+        prepared_query = "INSERT INTO chats(chat_id,chat_name) VALUES(%s,%s)"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                try:
+                    await cur.execute(prepared_query,(chat_id,chat_name))
+                    await conn.commit()
+                    return f"Inserted chats {chat_id}"
+                except Exception as e:
+                    log.warning(e)
+                    return e
 
 connection = Database(user,password,database,host)

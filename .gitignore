@@ -3,3 +3,4 @@ chatapp/*
 .env
 init-db.sql
 venv/*
+log.log

@@ -26,9 +26,9 @@ CREATE TABLE chat_users(
 );
 
 CREATE TABLE messages(
-  id int,
+  id int AUTO_INCREMENT,
   sent_by int NOT NULL,
-  time_sent TIMESTAMP NOT NULL,
+  time_sent DATETIME NOT NULL,
   chat_id char(36) NOT NULL,
   content TEXT(2048) NOT NULL,
   status ENUM('DELIVERED','NOT-DELIVERED') NOT NULL,

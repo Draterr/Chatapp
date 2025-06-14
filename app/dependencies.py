@@ -3,7 +3,7 @@ import json # import typing
 
 #create error_object with all the detail then json_Response will just append those objects into an array and display it
 class response_object:
-    def __init__(self,status_code:int,title:str,detail:str):
+    def __init__(self,status_code=None,title=None,detail=None):
         self.status_code = status_code
         self.title = title 
         self.detail = detail 
@@ -16,12 +16,12 @@ class response_object:
         
 class json_response:
     def create_message(self,status:str,list_obj:list[response_object]):
-        response = {"error":[]}
+        response = {status:[]}
         for error in list_obj:
             error = error.to_dict()
-            response["error"].append(error)
+            response[status].append(error)
         return json.dumps(response)
 
-if __name__ == "__main__":
-    test = json_response()
-    a = [response_object(422,"test","lol")]
+# if __name__ == "__main__":
+    # test = json_response()
+    # a = [response_object(422,"test","lol")]
