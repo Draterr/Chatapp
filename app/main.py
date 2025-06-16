@@ -34,7 +34,7 @@ def index():
         <ul id='messages'>
         </ul>
         <script>
-            var client_id = 1;
+            var client_id = 2;
             document.querySelector("#ws-id").textContent = client_id;
             var ws = new WebSocket(`ws://localhost:8000/ws/${client_id}`);
             ws.onmessage = function(event) {

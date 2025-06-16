@@ -4,8 +4,10 @@ import websocket
 import json
 import logging
 from app.db import connection
+from app.dependencies import json_response
 
 wsroute = APIRouter()
+json_res = json_response()
 
 class connection_manager:
     def __init__(self):
@@ -17,7 +19,8 @@ class connection_manager:
         self.active_connections.update({client_id:websocket})
         return True
 
-    async def send_message(self,message:str,websocket:WebSocket):
+    async def send_message(self,message:str,receiver_id:int):
+        websocket = self.active_connections[receiver_id]
         await websocket.send_text(message)
 
     async def broadcast(self,message:str):
@@ -43,6 +46,7 @@ class MessageManager:
 
 manager = connection_manager()
 
+#ToDO:
 #the client id should be derived from the cookie
 @wsroute.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket,client_id: int):
@@ -51,7 +55,9 @@ async def websocket_endpoint(websocket: WebSocket,client_id: int):
     connect_status = manager.connect(client_id,websocket)
     if not connect_status:
         return "existing connection"
-
+    else:
+        pending_messages = await connection.check_pending_messages(2)
+        await send_pending_messages(pending_messages,client_id)
     try:
         print(manager)
         while True:
@@ -68,3 +74,14 @@ async def websocket_endpoint(websocket: WebSocket,client_id: int):
         manager.disconnect(client_id)
         print(manager)
         print(f"{client_id} disconnected")
+
+async def send_pending_messages(messages:tuple|None,receiver_id:int):
+    if not messages:
+        return
+    for message in messages:
+        chat_id = message[0]
+        time_sent = message[1].strftime("%Y-%m-%d %H:%M:%S")
+        content = message[2]
+        res = json_res.create_message_json(chat_id,time_sent,content)
+        print(f"sent {receiver_id}")
+        await manager.send_message(res,receiver_id)

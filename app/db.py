@@ -72,7 +72,7 @@ class Database:
                 try:
                     await cur.execute(insert_message,(message_id,sender_id,time_sent,chat_id,message))
                     await cur.execute(get_users,(chat_id,sender_id))
-                    user_ids = await cur.fetchmany()
+                    user_ids = await cur.fetchall()
                     print(user_ids)
                     for i in user_ids:
                         tmp = []
@@ -104,9 +104,18 @@ class Database:
                     return e
 
     async def check_pending_messages(self,client_id:int):
-        prepared_query = "SELECT * FROM messages WHERE"
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(prepared_query,username)
+        prepared_query = "SELECT b.chat_id,b.time_sent,b.content FROM message_status as a INNER JOIN messages as b ON a.message_id = b.message_id WHERE receiver_id = %s AND status = 'NOT-DELIVERED'"
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(prepared_query,(client_id))
+                    messages = await cur.fetchall()
+                    if cur.rowcount < 1:
+                        return None
+                    return messages
+        except Exception as e:
+            return e
+
+
 
 connection = Database(user,password,database,host)

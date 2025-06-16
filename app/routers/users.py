@@ -42,33 +42,33 @@ async def register(user: User):
     if len(user.username) < 1:
         root.info("Received an invalid username")
         response.set_attribute(400,"Invalid Username","username can't be empty")
-        return json_res.create_message("error",[response])
+        return json_res.create_status("error",[response])
     if len(user.password) < 1:
         root.info("Received an invalid password")
         response.set_attribute(400,"Invalid Password","password can't be empty")
-        return json_res.create_message("error",[response])
+        return json_res.create_status("error",[response])
     if len(user.username) > 255:
         root.info("Received a username that was too long")
         response.set_attribute(400,"Invalid username","username has to be within 255 characters")
-        return json_res.create_message("error",[response])
+        return json_res.create_status("error",[response])
     role = "user"
     status = await connection.insert_user(user.username,user.password,role,user.username)
     if status == "duplicate":
         response.set_attribute(400,"Duplicate username","username already exists")
-        return json_res.create_message("error",[response])
+        return json_res.create_status("error",[response])
     response.set_attribute(200,"Success","Successfully Registed!")
     root.debug(f"new user created {user.username}")
-    return json_res.create_message("success",[response])
+    return json_res.create_status("success",[response])
 
 @router.post("/login",tags=["users"])
 async def login(user: User,response: Response):
     res_obj = response_object()
     if len(user.username) < 1:
         res_obj.set_attribute(400,"Invalid Username","username can't be empty")
-        return json_res.create_message([response])
+        return json_res.create_status([response])
     if len(user.password) < 1:
         res_obj.set_attribute(400,"Invalid Password","password can't be empty")
-        return json_res.create_message([response])
+        return json_res.create_status([response])
     status,role,user_id = await connection.check_credentials(user.username,user.password)
     if status == True:
         data = {"user":user.username,"role":role,"user_id":user_id}
