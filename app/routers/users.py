@@ -75,5 +75,7 @@ async def login(user: User,response: Response):
         jwt_token,cookie_expire_date = create_access_token(data)
         response.set_cookie(key="session",value=jwt_token,httponly=True,secure=True,expires=cookie_expire_date)
         return "Cookie Set!"
-    elif not status:
+    elif status == False:
         return "incorrect username or password."
+    else:
+        return status

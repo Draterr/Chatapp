@@ -26,13 +26,21 @@ CREATE TABLE chat_users(
 );
 
 CREATE TABLE messages(
-  id int AUTO_INCREMENT,
+  message_id char(36) NOT NULL,
   sent_by int NOT NULL,
   time_sent DATETIME NOT NULL,
   chat_id char(36) NOT NULL,
   content TEXT(2048) NOT NULL,
-  status ENUM('DELIVERED','NOT-DELIVERED') NOT NULL,
-  PRIMARY KEY(id),
+  PRIMARY KEY(message_id),
   FOREIGN KEY(sent_by) REFERENCES users(user_id),
   FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
+);
+
+CREATE TABLE message_status(
+  message_id char(36) NOT NULL,
+  receiver_id int NOT NULL,
+  status ENUM('DELIVERED','NOT-DELIVERED') NOT NULL DEFAULT 'NOT-DELIVERED',
+  PRIMARY KEY(message_id,receiver_id),
+  FOREIGN KEY(receiver_id) REFERENCES users(user_id),
+  FOREIGN KEY(message_id) REFERENCES messages(message_id)
 );
