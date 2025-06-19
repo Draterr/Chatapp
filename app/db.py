@@ -46,6 +46,7 @@ class Database:
                                                db=self.database,
                                                minsize=min_pool_size,
                                                maxsize=max_pool_size,
+                                               autocommit=True
                                                )
         except Exception as e:
             log.warning(e)
@@ -73,7 +74,7 @@ class Database:
         conn,cur = await self.get_connection()
         try:
             await cur.execute(prepared_query,(username,hashed_password,role,display_name))
-            await conn.commit()
+            # await conn.commit()
         except aiomysql.IntegrityError:
             raise HTTPException(status_code=400,detail="username already exists")
         finally:
@@ -98,9 +99,8 @@ class Database:
                 tmp.append(message_id)
                 tmp.append(user_id)
                 data.append(tuple(tmp))
-            print(data)
             await cur.executemany(insert_message_status,data)
-            await conn.commit()
+            # await conn.commit()
             return True
         except Exception as e:
             log.warning(e)
@@ -114,7 +114,7 @@ class Database:
         conn,cur = await self.get_connection()
         try:
             await cur.execute(insert_chat_prepared_query,(chat_id,chat_name))
-            await conn.commit()
+            # await conn.commit()
             for users in chat_users:
                 await cur.execute(insert_chat_users_prepared_query,(chat_id,users))
             return True
@@ -148,7 +148,7 @@ class Database:
             for i in message_id:
                 await cur.execute(prepared_query,(i))
                 count += cur.rowcount
-            await conn.commit()
+            # await conn.commit()
             print(str(count)+" Row Updated")
             return True
         except Exception as e:

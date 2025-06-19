@@ -29,10 +29,14 @@ def index():
             <input type="text" id="messageText" autocomplete="off"/>
             <button>Send</button>
         </form>
+        <form action="" onsubmit="sendMessage2(event)">
+            <input type="text" id="messageText2" autocomplete="off"/>
+            <button>Send</button>
+        </form>
         <ul id='messages'>
         </ul>
         <script>
-            var client_id = 1;
+            var client_id = 2;
             document.querySelector("#ws-id").textContent = client_id;
             var ws = new WebSocket(`ws://127.0.0.1:8000/ws`);
             ws.onmessage = function(event) {
@@ -45,6 +49,14 @@ def index():
             function sendMessage(event) {
                 var input = document.getElementById("messageText")
                 var chat_id = "d1bcd22b-81fb-4094-8412-ff28a532c93a";
+                var json = {"client_id":client_id,"chat_id":chat_id,"message":input.value}
+                ws.send(JSON.stringify(json))
+                input.value = ''
+                event.preventDefault()
+            }
+            function sendMessage2(event) {
+                var input = document.getElementById("messageText2")
+                var chat_id = "2b9293a2-d50b-445a-a82f-777523bdb741";
                 var json = {"client_id":client_id,"chat_id":chat_id,"message":input.value}
                 ws.send(JSON.stringify(json))
                 input.value = ''
@@ -70,10 +82,14 @@ def index():
             <input type="text" id="messageText" autocomplete="off"/>
             <button>Send</button>
         </form>
+        <form action="" onsubmit="sendMessage2(event)">
+            <input type="text" id="messageText2" autocomplete="off"/>
+            <button>Send</button>
+        </form>
         <ul id='messages'>
         </ul>
         <script>
-            var client_id = 2;
+            var client_id = 3;
             document.querySelector("#ws-id").textContent = client_id;
             var ws = new WebSocket(`ws://127.0.0.1:8000/ws`);
             ws.onmessage = function(event) {
@@ -86,6 +102,14 @@ def index():
             function sendMessage(event) {
                 var input = document.getElementById("messageText")
                 var chat_id = "d1bcd22b-81fb-4094-8412-ff28a532c93a";
+                var json = {"client_id":client_id,"chat_id":chat_id,"message":input.value}
+                ws.send(JSON.stringify(json))
+                input.value = ''
+                event.preventDefault()
+            }
+            function sendMessage2(event) {
+                var input = document.getElementById("messageText2")
+                var chat_id = "2b9293a2-d50b-445a-a82f-777523bdb741";
                 var json = {"client_id":client_id,"chat_id":chat_id,"message":input.value}
                 ws.send(JSON.stringify(json))
                 input.value = ''

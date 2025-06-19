@@ -28,7 +28,7 @@ CREATE TABLE chat_users(
 CREATE TABLE messages(
   message_id char(36) NOT NULL,
   sent_by int NOT NULL,
-  time_sent DATETIME NOT NULL,
+  time_sent DATETIME(6) NOT NULL,
   chat_id char(36) NOT NULL,
   content TEXT(2048) NOT NULL,
   PRIMARY KEY(message_id),

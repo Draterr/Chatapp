@@ -1,4 +1,7 @@
-fastapi==0.115.12
-mysql_connector_repackaged==0.3.1
-pydantic==2.11.5
+aiomysql==0.2.0
+fastapi==0.115.13
+passlib==1.7.4
+pydantic==2.11.7
+PyJWT==2.3.0
+PyJWT==2.10.1
 python-dotenv==1.1.0
