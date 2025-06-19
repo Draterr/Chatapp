@@ -130,16 +130,14 @@ async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, 
     else:
         pending_messages = await connection.check_pending_messages(client_id)
         if pending_messages:
-            # print(pending_messages)
             await deliver_pending_messages(pending_messages,client_id)
     try:
         while True:
-            data = await websocket.receive_text()
-            data = MessageManager(data)
+            data = await websocket.receive_json()
             print(f"{client_id} said {data}")
-            client_id = data.get_client_id()
-            message = data.get_message()
-            chat_id = data.get_chat_id()
+            client_id = data["client_id"]
+            message = data["message"]
+            chat_id = data["chat_id"]
             await user_send_message(client_id,chat_id,message)
     except WebSocketDisconnect:
         await manager.disconnect(client_id)

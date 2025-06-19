@@ -1,5 +1,5 @@
 import aiomysql
-from typing import *
+from typing import List
 import os
 from fastapi import HTTPException
 from passlib.hash import bcrypt
