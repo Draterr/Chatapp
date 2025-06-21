@@ -20,5 +20,10 @@ services:
       - type: volume
         source: chatapp-db
         target: /var/lib/mysql
+  redis:
+    env_file: ./app/.env
+    image: "redis:alpine"
+    ports:
+      - "6379:6379"
 volumes:
   chatapp-db:
