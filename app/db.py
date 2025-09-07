@@ -1,18 +1,17 @@
 import aiomysql
+from sys import stdout
+from loguru import logger
 from typing import List
 import os
 from fastapi import HTTPException
 from passlib.hash import bcrypt
-import logging
 import uuid
-
 
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
 host = os.getenv("DB_HOST")
 database = os.getenv("DB_DATABASE")
-log = logging.getLogger(__name__)
-logging.basicConfig(filename="log.log",encoding="utf-8",level=logging.DEBUG)
+logger.add(stdout,format="{time} {level} {message}",level="INFO")
 
 class Database:
     def __init__(self,user: str|None,password:str|None,database:str|None,host:str|None):
@@ -154,6 +153,19 @@ class Database:
         except Exception as e:
             log.warning(e)
             return False
+        finally:
+            await self.free_connection(conn,cur)
+
+    async def get_chats(self,user_id:str) -> List[str]:
+        prepared_query = "SELECT chat_id FROM chat_users WHERE user_id=%s"
+        conn,cur = await self.get_connection()
+        try:
+            await cur.execute(prepared_query,(user_id))
+            chat_ids = await cur.fetchall()
+            return chat_ids
+        except Exception as e:
+            log.warning(e)
+            return []
         finally:
             await self.free_connection(conn,cur)
 

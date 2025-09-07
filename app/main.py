@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv() #load the environment variables in the main module so that all the child modules can have access to the env
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles 
 from app.routers import users,websocket,chats
 from app.db import connection
 from typing import Annotated
@@ -10,13 +11,14 @@ app = FastAPI()
 app.include_router(users.router)
 app.include_router(websocket.wsroute)
 app.include_router(chats.chats)
+# app.mount("/static",StaticFiles(directory="static"),name="static")
 
 @app.on_event("startup")
 async def db_connect():
     await connection.initialize_connection(5,10)
 @app.get("/")
 def index():
-    return  HTMLResponse("""
+    return HTMLResponse("""
 <!DOCTYPE html>
 <html>
     <head>
@@ -119,4 +121,3 @@ def index():
     </body>
 </html>
 """)
-#

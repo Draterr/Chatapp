@@ -1,0 +1,5 @@
+CREATE USER 'chatappuser'@'%' IDENTIFIED BY 'examplepassword';
+GRANT ALL PRIVILEGES ON chatapp.* TO 'chatappuser'@'%';
+FLUSH PRIVILEGES;
+USE chatapp;
+INSERT INTO users(username,password,role,display_name) VALUES('admin','admin bcrypt hash','admin','administrator');
