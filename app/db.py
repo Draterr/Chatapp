@@ -9,8 +9,14 @@ import uuid
 
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
-host = os.getenv("DB_HOST")
 database = os.getenv("DB_DATABASE")
+APP_ENV = os.getenv("APP_ENV")
+if APP_ENV != "DOCKER":
+    host = "127.0.0.1"
+    port = 3307
+else:
+    host = "mysql_db"
+    port = 3306
 logger.add(stdout,format="{time} {level} {message}",level="INFO")
 
 class Database:
@@ -41,14 +47,14 @@ class Database:
             self.pool = await aiomysql.create_pool(host=self.host,
                                                user=self.user,
                                                password=self.password,
-                                               port=3307,
+                                               port=port,
                                                db=self.database,
                                                minsize=min_pool_size,
                                                maxsize=max_pool_size,
                                                autocommit=True
                                                )
         except Exception as e:
-            log.warning(e)
+            logger.warning(e)
 
     async def check_credentials(self,username:str,password:str):
         prepared_query = "SELECT password,role,user_id FROM users WHERE username= %s"
@@ -102,7 +108,7 @@ class Database:
             # await conn.commit()
             return True
         except Exception as e:
-            log.warning(e)
+            logger.warning(e)
             return e 
         finally:
             await self.free_connection(conn,cur)
@@ -118,7 +124,7 @@ class Database:
                 await cur.execute(insert_chat_users_prepared_query,(chat_id,users))
             return True
         except Exception as e:
-            log.warning(e)
+            logger.warning(e)
             raise HTTPException(status_code=400,detail="Something went wrong with creating chat")
         finally:
             await self.free_connection(conn,cur)
@@ -134,7 +140,7 @@ class Database:
                 return None
             return messages
         except Exception as e:
-            log.warning(e)
+            logger.warning(e)
             return False
         finally:
             await self.free_connection(conn,cur)
@@ -151,7 +157,7 @@ class Database:
             print(str(count)+" Row Updated")
             return True
         except Exception as e:
-            log.warning(e)
+            logger.warning(e)
             return False
         finally:
             await self.free_connection(conn,cur)
@@ -164,7 +170,7 @@ class Database:
             chat_ids = await cur.fetchall()
             return chat_ids
         except Exception as e:
-            log.warning(e)
+            logger.warning(e)
             return []
         finally:
             await self.free_connection(conn,cur)

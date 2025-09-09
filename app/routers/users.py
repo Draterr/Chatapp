@@ -1,14 +1,17 @@
 from fastapi import APIRouter, Response,Depends,HTTPException,Cookie
 from jwt import decode
 from pydantic import BaseModel
-from app.db import connection
+from db import connection
 from os import getenv
 import jwt
 from datetime import datetime,timedelta,timezone
 from typing import Annotated
+from sys import stdout
+from loguru import logger
 
 router = APIRouter()
 
+logger.add(stdout,format="{time} {level} {message}",level="INFO")
 JWT_SECRET_KEY = getenv("JWT_SECRET_KEY")
 ALGO = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 4320
@@ -37,7 +40,7 @@ async def verify_jwt(session:Annotated[str|None, Cookie()]):
     try:
         cookie_val = decode(session,JWT_SECRET_KEY,algorithms=["HS256"])
     except Exception as e:
-        print(e)
+        logger.warning(e)
         return None
     return cookie_val
 
@@ -55,6 +58,7 @@ async def user_validation(user:User):
 async def register(user: Annotated[User, Depends(user_validation)]):
     role = "user"
     await connection.insert_user(user.username,user.password,role,user.username)
+    logger.info(f"new user {user.username} just registered!")
     return {"message":"Successfully Registed!"}
 
 @router.post("/login",tags=["users"])
@@ -63,6 +67,7 @@ async def login(user: Annotated[User, Depends(user_validation)],response: Respon
     data = {"user":user.username,"role":role,"user_id":user_id}
     jwt_token,cookie_expire_date = create_access_token(data)
     response.set_cookie(key="session",value=jwt_token,httponly=True,secure=True,expires=cookie_expire_date)
+    logger.info(f"{user.username} logged in!")
     return {"message":"Cookie Set!"}
 
 

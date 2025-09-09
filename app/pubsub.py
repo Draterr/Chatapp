@@ -1,8 +1,13 @@
+from db import APP_ENV
 import redis.asyncio as redis
+
 
 class Pubsub:
     def __init__(self):
-        self.r = redis.Redis(host='localhost',port=6379,decode_responses=True)
+        if APP_ENV == "DOCKER":
+            self.r = redis.Redis(host='redis',port=6379,decode_responses=True)
+        else:
+            self.r = redis.Redis(host='127.0.0.1',port=6379,decode_responses=True)
         self.pubsub = self.r.pubsub()
 
     async def subscribe(self,chat_id:str):

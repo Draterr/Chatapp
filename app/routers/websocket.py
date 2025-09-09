@@ -8,10 +8,10 @@ from fastapi.encoders import jsonable_encoder
 import json
 from typing import List
 from pydantic import BaseModel
-from app.db import connection
-from app.dependencies import sort_by_time
-from app.routers.users import verify_jwt
-from app.pubsub import *
+from db import connection
+from dependencies import sort_by_time
+from routers.users import verify_jwt
+from pubsub import *
 
 
 logger.add(stdout,format="{time} {level} {message}",level="INFO")
@@ -24,7 +24,6 @@ class SuccessMessage(BaseModel):
     time_sent:str
 
 class SuccessResponse(BaseModel):
-    chat_id: str
     messages: List[SuccessMessage]
     timestamp: str
 
@@ -61,16 +60,15 @@ class WebsocketManager:
         return True
 
     async def pubsub_reader(self):
-        while True:
-            await self.pubsub_instance.subscribe("init")
-            message = await self.pubsub_instance.pubsub.get_message(ignore_subscribe_messages=True)
-            if message is not None:
-                logger.info("got message "+str(message))
-                chat_id = message["channel"]
-                content = message["data"]
-                logger.debug(self.chats)
-                for _,websocket in self.chats[chat_id]:
-                    await websocket.send_json(content,mode="text")
+            while True:
+                message = await self.pubsub_instance.pubsub.get_message(ignore_subscribe_messages=True)
+                if message is not None:
+                    logger.info("got message "+str(message))
+                    chat_id = message["channel"]
+                    content = message["data"]
+                    logger.debug(self.chats)
+                    for _,websocket in self.chats[chat_id]:
+                        await websocket.send_json(content,mode="text")
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)
@@ -108,7 +106,10 @@ class MessageManager:
 manager = WebsocketManager()
 @wsroute.on_event("startup")
 async def start_pubsub_reader():
-    asyncio.create_task(manager.pubsub_reader())
+    await manager.pubsub_instance.subscribe("init")
+    message = await manager.pubsub_instance.pubsub.get_message()
+    if message is not None and message["type"] == "subscribe":
+        asyncio.create_task(manager.pubsub_reader())
         
 
 async def user_send_message(sender_id:int,chat_id:str,message:str):
@@ -134,7 +135,7 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
     for chat_id,time_sent,content,sender,message_id in messages:
         if chat_id in objs:
             continue
-        objs[chat_id] = SuccessResponse(chat_id=chat_id,messages=[],timestamp=time_stamp)
+        objs[chat_id] = SuccessResponse(messages=[],timestamp=time_stamp)
     #populate each SuccessMessage with the message information
     message_ids = []
     for message in messages:
@@ -150,6 +151,7 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
     for chat_id,value in objs.items():
         objs[chat_id].messages = sort_by_time(value.messages)
     logger.info(f"{sender} sent {receiver_id}: {content}")
+    logger.debug(objs)
     await manager.active_connections.get(receiver_id).send_json(jsonable_encoder(objs),mode="text")
     await connection.set_delivery_status(message_ids)
 

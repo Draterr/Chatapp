@@ -3,9 +3,10 @@ load_dotenv() #load the environment variables in the main module so that all the
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles 
-from app.routers import users,websocket,chats
-from app.db import connection
+from routers import users,websocket,chats
+from db import connection
 from typing import Annotated
+import uvicorn
 
 app = FastAPI()
 app.include_router(users.router)
@@ -121,3 +122,6 @@ def index():
     </body>
 </html>
 """)
+
+if __name__ == "__main__":
+    uvicorn.run(app,port=8000,host='0.0.0.0')

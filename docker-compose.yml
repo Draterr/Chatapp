@@ -1,14 +1,16 @@
 services:
-  # backend:
-  #   build:
-  #     context: ./app
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "8000:8000"
-  #   volumes:
-  #     - type: bind
-  #       source: /home/drater/Documents/Chatapp/app
-  #       target: /app
+  backend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    environment:
+      - APP_ENV=DOCKER
+    ports:
+      - "8000:8000"
+    volumes:
+      - type: bind
+        source: ./app
+        target: /app
   mysql_db:
     env_file: ./app/.env
     build:
@@ -25,5 +27,15 @@ services:
     image: "redis:alpine"
     ports:
       - "6379:6379"
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports: 
+      - "8080:80"
+    volumes:
+      - type: bind
+        source: ./static
+        target: /etc/nginx/html
 volumes:
   chatapp-db:
