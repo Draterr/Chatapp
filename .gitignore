@@ -4,3 +4,4 @@ chatapp/*
 init-db.sql
 venv/*
 log.log
+.DS_Store

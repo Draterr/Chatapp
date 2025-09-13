@@ -55,6 +55,7 @@ class Database:
                                                )
         except Exception as e:
             logger.warning(e)
+            raise RuntimeError(e)
 
     async def check_credentials(self,username:str,password:str):
         prepared_query = "SELECT password,role,user_id FROM users WHERE username= %s"
@@ -63,7 +64,6 @@ class Database:
             await cur.execute(prepared_query,username)
             stored_password = await cur.fetchone()
         except Exception as e:
-            print(e)
             raise HTTPException(status_code=400,detail="Something went wrong with SQL query")
         finally:
             await self.free_connection(conn,cur)
