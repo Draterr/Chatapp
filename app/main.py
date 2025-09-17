@@ -3,7 +3,6 @@ print(load_dotenv()) #load the environment variables in the main module so that 
 from fastapi import FastAPI
 from routers import users,websocket,chats
 from db import connection
-import uvicorn
 
 app = FastAPI()
 app.include_router(users.router)

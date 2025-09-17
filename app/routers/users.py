@@ -1,4 +1,6 @@
+from aiomysql.cursors import re
 from fastapi import APIRouter, Response,Depends,HTTPException,Cookie
+from fastapi.responses import RedirectResponse
 from jwt import decode
 from pydantic import BaseModel
 from db import connection
@@ -68,6 +70,6 @@ async def login(user: Annotated[User, Depends(user_validation)],response: Respon
     jwt_token,cookie_expire_date = create_access_token(data)
     response.set_cookie(key="session",value=jwt_token,httponly=True,secure=True,expires=cookie_expire_date)
     logger.info(f"{user.username} logged in!")
-    return {"message":"Cookie Set!"}
+    return {"message":"Successfully Loggined!"}
 
 

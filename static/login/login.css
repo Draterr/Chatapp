@@ -1,16 +1,22 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans&display=swap');
 *{
-	box-sizing: border-box;
-	font-family: "Plus Jakarta Sans",system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
 	--background-color: #121212;
 	--text-color: #EAEAEA;
 	--primary-color: #6C63FF;
+}
+video{
+	position: fixed;
+	right: 0;
+	bottom: 0;
+	min-width: 100%;
+	min-height: 100%;
 }
 body{
 	display:flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	background-color: var(--background-color);
+	/* background-color: var(--background-color); */
 	height:100vh;
 	margin:0;
 }
@@ -23,7 +29,7 @@ body{
 	height: auto;
 	margin: 50px;
 	padding: 20px;
-	opacity: 0.7;
+	opacity: 0.9;
 	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.7);
 }
 .left-container{
@@ -31,7 +37,7 @@ body{
 	position: relative;
 	width: 500px;
 	flex-direction: column;
-	background: url("./moun.jpg");
+	background: url("../assets/images/moun.jpg");
 	background-size: cover;
 	background-position: bottom;
 	background-repeat: no-repeat;
@@ -58,7 +64,9 @@ body{
 }
 .input-div{
 	display: flex;
+	position: relative;
 	flex-direction: column;
+	color: var(--text-color);
 	gap: 5px;
 }
 .input-div > input{
@@ -70,6 +78,17 @@ body{
 	border-style: none;
 	width: 350px;
 	color: var(--text-color);
+}
+.input-div > span{
+	position: absolute;
+	top: 17px;
+	right: 15px;
+}
+.input-div > input:focus{
+	outline:none;
+}
+.input-div > input:hover{
+	outline:solid 1px;
 }
 .login-text{
 	color: var(--text-color);
@@ -91,11 +110,18 @@ body{
 	color: var(--text-color);
 	box-shadow: 0 0 25px rgba(108, 99, 255, 0.6);
 }
+.login-button:hover{
+	cursor: pointer;
+	background-color: #7C74FF;
+	box-shadow: 0 0 12px rgba(108, 99, 255, 0.6); 
+}
 .register{
 	position: absolute;
 	top: 1px;
 	right: 1px;
-	color: var(--text-color);
+}
+.register > a:hover{
+	color: #7C74FF;
 }
 .register > a{
 	color: var(--primary-color);
@@ -105,6 +131,21 @@ body{
 }
 .forgot{
 	margin-top: 5px;
-	text-align: right;
+	align-self: flex-end;
 	font-size: 15px;
+}
+.forgot:hover{
+	color: hsl(0,0%,74%);
+}
+@media only screen and (max-width: 1000px){
+	.left-container{
+		display: none;
+	}
+}
+@media only screen and (max-width: 540px){
+	.register{
+		position: absolute;
+		top: 50px;
+		right: 130px;
+	}
 }
