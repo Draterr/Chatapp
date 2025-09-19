@@ -8,20 +8,23 @@
     </head>
     <body>
         <div class="navbar">
-            <img class="profile_picture" src="assets/images/default_profile.png" width=50 height=50>
+            <img class="profile_picture" src="assets/images/default_profile.png" alt="image failed to load" width=50 height=50>
             <div class="navbar-items">
                 <div class="navbar-item">
                     <i class="fa-regular fa-message"></i>
-                    <p>Messages</p>
+                    <p hidden>Messages</p>
                 </div>
-                <div class="navbar-item">
+                <div class="navbar-item setting">
                     <i class="fa-solid fa-gear"></i>
-                    <p>Settings</p>
+                    <p hidden>Settings</p>
                 </div>
             </div>
         </div>
-        <div class="searchbar">
-            3
+        <div class="searchbar-area">
+            <form class="searchbar-form">
+            <input class="searchbar" type="text" name="search">
+            <button id="search" class="mg"><i class="fa-solid fa-magnifying-glass "></i></button>
+            </form>
         </div>
         <div class="chat_history">
             2
