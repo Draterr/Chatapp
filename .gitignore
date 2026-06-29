@@ -5,3 +5,4 @@ init-db.sql
 venv/*
 log.log
 .DS_Store
+BACKEND_TODO.md
