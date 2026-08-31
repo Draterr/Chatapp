@@ -60,15 +60,15 @@ class WebsocketManager:
         return True
 
     async def pubsub_reader(self):
-            while True:
-                message = await self.pubsub_instance.pubsub.get_message(ignore_subscribe_messages=True)
-                if message is not None:
-                    logger.info("got message "+str(message))
-                    chat_id = message["channel"]
-                    content = message["data"]
-                    logger.debug(self.chats)
-                    for _,websocket in self.chats[chat_id]:
-                        await websocket.send_json(content,mode="text")
+        async for message in self.pubsub_instance.pubsub.listen():
+            if message["type"] != "message":
+                continue
+            logger.info("got message "+str(message))
+            chat_id = message["channel"]
+            content = message["data"]
+            logger.debug(self.chats)
+            for _,websocket in self.chats.get(chat_id,[]):
+                await websocket.send_json(content,mode="text")
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)
@@ -83,10 +83,18 @@ class WebsocketManager:
             await i.send_json(message) 
 
     async def disconnect(self,client_id:int,websocket):
-        del self.active_connections[client_id]
-        for i in self.chats.values():
-            i.remove((client_id,websocket))
-            logger.info(f"{i} has been removed from active websockets")
+        self.active_connections.pop(client_id,None)
+        entry = (client_id,websocket)
+        for chat_id in list(self.chats):          
+            members = self.chats[chat_id]
+            if entry not in members:
+                continue
+            members.remove(entry)
+            logger.info(f"{client_id} removed from {chat_id}")
+            if not members:                       
+                del self.chats[chat_id]
+                await self.pubsub_instance.unsubscribe(chat_id)
+                logger.info(f"{chat_id} empty; unsubscribed")
 
     def __str__(self):
         return str(self.active_connections)
@@ -153,7 +161,7 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
     logger.info(f"{sender} sent {receiver_id}: {content}")
     logger.debug(objs)
     await manager.active_connections.get(receiver_id).send_json(jsonable_encoder(objs),mode="text")
-    await connection.set_delivery_status(message_ids)
+    await connection.set_delivery_status(message_ids,receiver_id)
 
 
 async def send_message(client_id:str,websocket:WebSocket):
@@ -177,16 +185,17 @@ async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, 
     chat_ids = await connection.get_chats(client_id)
     connect_status = await manager.connect(client_id,websocket,chat_ids)
     if not connect_status:
-        return
-    else:
+        return                                     # duplicate connection — this socket was never
+                                                   # registered, so don't run cleanup for it
+    try:
         pending_messages = await connection.check_pending_messages(client_id)
         if pending_messages:
             await deliver_pending_messages(pending_messages,client_id)
-    try:
         await send_message(client_id,websocket)
     except WebSocketDisconnect:
-        await manager.disconnect(client_id,websocket)
         logger.error(f"{username} disconnected")
     except Exception as e:
         logger.error(e)
+    finally:
+        await manager.disconnect(client_id,websocket)
 

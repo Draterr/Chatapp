@@ -145,15 +145,15 @@ class Database:
         finally:
             await self.free_connection(conn,cur)
 
-    async def set_delivery_status(self,message_id:List[str]):
-        prepared_query = "UPDATE message_status SET status = 'DELIVERED' WHERE message_id = %s"
+    async def set_delivery_status(self,message_id:List[str],receiver_id:int):
+        prepared_query = "UPDATE message_status SET status = 'DELIVERED' WHERE message_id = %s AND receiver_id = %s"
         conn,cur = await self.get_connection()
         count = 0
         try:
             for i in message_id:
-                await cur.execute(prepared_query,(i))
+                await cur.execute(prepared_query,(i,receiver_id))
                 count += cur.rowcount
-            # await conn.commit()
+            await conn.commit()
             print(str(count)+" Row Updated")
             return True
         except Exception as e:

@@ -13,6 +13,9 @@ class Pubsub:
     async def subscribe(self,chat_id:str):
         await self.pubsub.subscribe(chat_id)
 
+    async def unsubscribe(self,chat_id:str):
+        await self.pubsub.unsubscribe(chat_id)
+
     async def publish_message(self,chat_id:str,message:str):
         try:
             await self.r.publish(chat_id,message)
