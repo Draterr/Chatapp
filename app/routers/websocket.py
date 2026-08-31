@@ -123,15 +123,17 @@ async def start_pubsub_reader():
 async def user_send_message(sender_id:int,chat_id:str,message:str):
     time = datetime.now(timezone.utc)
     time_sent = time.strftime("%Y-%m-%d %H:%M:%S.%f")
-    insert_status = await connection.insert_message(sender_id,time_sent,chat_id,message)
-    if insert_status != True:
-        response = jsonable_encoder(ErrorResponse(type="error",code="DB INSERT ERROR",detail=str(insert_status)))
-        await manager.notify_status(response,sender_id)
-    else:
-        time_stamp = time.strftime("%H:%M:%S")
-        response = jsonable_encoder(AcknowledgeResponse(type="ack",content={"message":message,"chat_id":chat_id},timestamp=time_stamp))
-        await manager.notify_status(response,sender_id)
-        await manager.send_message(message,chat_id)
+    try:
+        await connection.insert_message(sender_id,time_sent,chat_id,message)
+    except Exception as e:
+        logger.warning(e)                                  # log the real cause
+        response = jsonable_encoder(ErrorResponse(type="error",code="DB_INSERT_ERROR",detail="could not save message"))
+        await manager.notify_status(response,sender_id)    # generic detail to the client
+        return
+    time_stamp = time.strftime("%H:%M:%S")
+    response = jsonable_encoder(AcknowledgeResponse(type="ack",content={"message":message,"chat_id":chat_id},timestamp=time_stamp))
+    await manager.notify_status(response,sender_id)
+    await manager.send_message(message,chat_id)
 
 
 async def deliver_pending_messages(messages:tuple,receiver_id:int):
@@ -182,8 +184,12 @@ async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, 
     client_id = session["user_id"]
     username = session["user"]
     logger.info(f"{username} connected")
-    chat_ids = await connection.get_chats(client_id)
-    connect_status = await manager.connect(client_id,websocket,chat_ids)
+    try:
+        chat_ids = await connection.get_chats(client_id)
+        connect_status = await manager.connect(client_id,websocket,chat_ids)
+    except Exception as e:
+        logger.error(e)                            # DB/connect failure before registration
+        return                                     # nothing registered yet -> no cleanup needed
     if not connect_status:
         return                                     # duplicate connection — this socket was never
                                                    # registered, so don't run cleanup for it
@@ -193,7 +199,7 @@ async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, 
             await deliver_pending_messages(pending_messages,client_id)
         await send_message(client_id,websocket)
     except WebSocketDisconnect:
-        logger.error(f"{username} disconnected")
+        logger.info(f"{username} disconnected")
     except Exception as e:
         logger.error(e)
     finally:

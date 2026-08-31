@@ -1,4 +1,3 @@
-from aiomysql.cursors import re
 from fastapi import APIRouter, Response,Depends,HTTPException,Cookie
 from fastapi.responses import RedirectResponse
 from jwt import decode
@@ -10,11 +9,16 @@ from datetime import datetime,timedelta,timezone
 from typing import Annotated
 from sys import stdout
 from loguru import logger
+from sys import exit
 
 router = APIRouter()
 
 logger.add(stdout,format="{time} {level} {message}",level="INFO")
-JWT_SECRET_KEY = getenv("JWT_SECRET_KEY")
+JWT_SECRET_KEY = getenv("JWT_SECRET_KEY",None)
+if JWT_SECRET_KEY is None:
+    logger.critical("JWT_SECRET_KEY NOT FOUND")
+    exit(1)
+
 ALGO = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 4320
 
@@ -38,7 +42,7 @@ def create_access_token(data:dict):
     cookie_expire_date = expire.strftime('%A, %d %b %Y %H:%M:%S GMT')
     return (encoded_jwt,cookie_expire_date)
 
-async def verify_jwt(session:Annotated[str|None, Cookie()]):
+async def verify_jwt(session:Annotated[str|None, Cookie()] = None):
     try:
         cookie_val = decode(session,JWT_SECRET_KEY,algorithms=["HS256"])
     except Exception as e:
@@ -71,5 +75,14 @@ async def login(user: Annotated[User, Depends(user_validation)],response: Respon
     response.set_cookie(key="session",value=jwt_token,httponly=True,secure=True,expires=cookie_expire_date)
     logger.info(f"{user.username} logged in!")
     return {"message":"Successfully Loggined!"}
+
+@router.get("/me",tags=["users"])
+async def current_user(session: Annotated[dict|None, Depends(verify_jwt)]):
+    if not session:
+        raise HTTPException(status_code=403,detail="Unauthorized")
+    profile = await connection.get_user_profile(session["user_id"])
+    return {"user_id":session["user_id"],"user":session["user"],**profile}
+
+
 
 
