@@ -30,7 +30,7 @@
             function sendMessage(event) {
                 var input = document.getElementById("messageText")
                 var chat_id = "d1bcd22b-81fb-4094-8412-ff28a532c93a";
-                var json = {"client_id":client_id,"chat_id":chat_id,"message":input.value}
+                var json = {"type":"message","client_id":client_id,"chat_id":chat_id,"message":input.value}
                 ws.send(JSON.stringify(json))
                 input.value = ''
                 event.preventDefault()
@@ -38,7 +38,7 @@
             function sendMessage2(event) {
                 var input = document.getElementById("messageText2")
                 var chat_id = "2b9293a2-d50b-445a-a82f-777523bdb741";
-                var json = {"client_id":client_id,"chat_id":chat_id,"message":input.value}
+                var json = {"type":"message","client_id":client_id,"chat_id":chat_id,"message":input.value}
                 ws.send(JSON.stringify(json))
                 input.value = ''
                 event.preventDefault()

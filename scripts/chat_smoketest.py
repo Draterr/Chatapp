@@ -80,7 +80,7 @@ async def main():
         await asyncio.sleep(0.2)  # let both subscriptions settle
 
         text = "hello from A"
-        await ws_a.send(json.dumps({"client_id": ids[a], "chat_id": chat_id, "message": text}))
+        await ws_a.send(json.dumps({"type":"message","client_id":ids[a], "chat_id": chat_id, "message": text}))
 
         ack = await recv_json(ws_a)
         print(f"A got ack: {ack}")

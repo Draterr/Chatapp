@@ -62,10 +62,16 @@ class WebsocketManager:
                 continue
             logger.info("got message "+str(message))
             chat_id = message["channel"]
-            content = message["data"]
+            content = message["data"]                 # already a JSON string
+            message_id = json.loads(content)["message_id"]
             logger.debug(self.chats)
-            for _,websocket in self.chats.get(chat_id,[]):
-                await websocket.send_text(content)   # content is already a JSON string
+            for receiver_id,websocket in self.chats.get(chat_id,[]):
+                try:
+                    await websocket.send_text(content)
+                except Exception:
+                    continue                          # dead socket -> leave NOT-DELIVERED, replays on reconnect
+                await connection.set_delivery_status([message_id],receiver_id)
+
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)
@@ -128,17 +134,15 @@ async def user_send_message(sender_name:str,sender_id:int,chat_id:str,message:st
         response = jsonable_encoder(ErrorResponse(type="error",code="DB_INSERT_ERROR",detail="could not save message"))
         await manager.notify_status(response,sender_id)    # generic detail to the client
         return
-    time_stamp = time.strftime("%H:%M:%S")
-    response = jsonable_encoder(AcknowledgeResponse(type="ack",content={"message":message,"chat_id":chat_id},timestamp=time_stamp))
+    response = jsonable_encoder(AcknowledgeResponse(type="ack",content={"message":message,"chat_id":chat_id},timestamp=time.isoformat()))
     await manager.notify_status(response,sender_id)
-    response = jsonable_encoder(MessageFrame(type="message",message_id=str(message_id),sender_id=sender_id,sender_name=sender_name,message=message,time_sent=time_sent,chat_id=chat_id))
+    response = jsonable_encoder(MessageFrame(type="message",message_id=str(message_id),sender_id=sender_id,sender_name=sender_name,message=message,time_sent=time.isoformat(),chat_id=chat_id))
     await manager.send_message(json.dumps(response),chat_id)
 
 
 async def deliver_pending_messages(messages:tuple,receiver_id:int):
     if not messages:
         return
-    time_stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
     objs = {}
     #unpack the tuples returned by the database and put the individual messages in each chat_id 
     for chat_id,time_sent,content,sender,message_id,sender_name in messages:
@@ -154,7 +158,7 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
         sender = message[3]
         message_id = message[4]
         sender_name = message[5]
-        tmp = MessageFrame(type="message",message_id=message_id,sender_id=sender,message=content,time_sent=time_sent.strftime("%Y-%m-%d %H:%M:%S.%f"),chat_id=chat_id,sender_name=sender_name)
+        tmp = MessageFrame(type="message",message_id=message_id,sender_id=sender,message=content,time_sent=time_sent.isoformat(),chat_id=chat_id,sender_name=sender_name)
         objs[chat_id].append(tmp)
         message_ids.append(message_id)
     #Sort the messages by the time sent
@@ -170,9 +174,13 @@ async def send_message(username:str,client_id:str,websocket:WebSocket):
     while True:
         data = await websocket.receive_json()
         logger.info(f"{client_id} said {data}")
+        type = data["type"]
         message = data["message"]
         chat_id = data["chat_id"]
-        await user_send_message(username,client_id,chat_id,message)
+        if type == "message":
+            await user_send_message(username,client_id,chat_id,message)
+        else:
+            await websocket.send_json(jsonable_encoder(ErrorResponse(type="error",code="unsupported_message_type",detail="the type is unsupported")))
 
 @wsroute.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, Depends(verify_jwt)]):

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from passlib.hash import bcrypt
 import uuid
+from datetime import datetime
 
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
@@ -134,5 +135,46 @@ class Database:
             await cur.execute(query,(user_id,))
             return await cur.fetchall()
 
+    async def get_chats_info(self,user_id:int) -> dict:
+        res = {}
+        async with self._transaction() as cur:
+            query_chatname_member = "SELECT a.chat_id, a.chat_name, u.user_id, u.display_name, u.avatar_url FROM chats AS a JOIN chat_users AS cu ON cu.chat_id = a.chat_id JOIN users AS u ON u.user_id = cu.user_id WHERE a.chat_id IN (SELECT chat_id FROM chat_users WHERE user_id = %s) ORDER BY a.chat_id"
+            query_unread_count = "SELECT b.chat_id, COUNT(*) AS unread FROM message_status a JOIN messages b ON b.message_id = a.message_id WHERE a.receiver_id = %s AND a.status = 'NOT-DELIVERED' GROUP BY b.chat_id"
+            query_last_message = "SELECT chat_id, message_id, sent_by, content, time_sent FROM (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY time_sent DESC) rn FROM messages m WHERE m.chat_id IN (SELECT chat_id FROM chat_users WHERE user_id = %s)) t WHERE rn = 1"
+            await cur.execute(query_chatname_member,(user_id,))
+            chatname_member = await cur.fetchall()
+            await cur.execute(query_unread_count,(user_id,))
+            unread_count = await cur.fetchall()
+            await cur.execute(query_last_message,(user_id,))
+            last_message = await cur.fetchall()
+            for chat_id, chat_name, user_id, display_name,avatar_url in chatname_member:
+                exist = res.get(chat_id)
+                if exist is None:
+                    tmp = {"chat_id":chat_id,"chat_name":chat_name,"members":[{"user_id":user_id,"display_name":display_name,"avatar_url":avatar_url}],"unread_message_count":0,"last_message":{}}
+                    res[chat_id] = tmp
+                    continue
+                res[chat_id]["members"].append({"user_id":user_id,"display_name":display_name,"avatar_url":avatar_url})
+            for chat_id,unread_count in unread_count:
+                res[chat_id]["unread_message_count"] = unread_count
+            for chat_id,message_id,sent_by,content,time_sent in last_message:
+                res[chat_id]["last_message"] = {"message_id":message_id,"sender_id":sent_by,"message":content,"time_sent":time_sent}
+            return {"data":sorted(res.values(),key=lambda x:x["last_message"].get("time_sent") or datetime.min,reverse=True)}
+    
+    async def get_chat_message(self,chat_id: str, user_id:int, limit:int,offset:int) -> dict :
+        query = ("SELECT m.message_id, m.sent_by, u.display_name, m.time_sent, m.chat_id, m.content "
+                 "FROM messages AS m "
+                 "JOIN users AS u ON u.user_id = m.sent_by "
+                 "WHERE m.chat_id IN (SELECT b.chat_id FROM chat_users AS b WHERE b.user_id = %s) "
+                 "AND m.chat_id = %s "
+                 "ORDER BY m.time_sent DESC LIMIT %s OFFSET %s")
+        async with self._transaction() as cur:
+            await cur.execute(query,(user_id,chat_id,limit,offset))
+            out = await cur.fetchall()
+        messages = [{"type":"message","message_id":message_id,"sender_id":sender_id,
+                     "sender_name":sender_name,"message":content,"time_sent":time_sent,"chat_id":cid}
+                    for message_id,sender_id,sender_name,time_sent,cid,content in out]
+        has_more = len(messages) == limit          # a full page -> assume more exist
+        messages.reverse()                         # DESC from SQL -> oldest->newest for display
+        return {"data":messages,"has_more":has_more}
 
 connection = Database(user,password,database,host)
