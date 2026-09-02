@@ -7,13 +7,11 @@ from os import getenv
 import jwt
 from datetime import datetime,timedelta,timezone
 from typing import Annotated
-from sys import stdout
 from loguru import logger
 from sys import exit
 
 router = APIRouter()
 
-logger.add(stdout,format="{time} {level} {message}",level="INFO")
 JWT_SECRET_KEY = getenv("JWT_SECRET_KEY",None)
 if JWT_SECRET_KEY is None:
     logger.critical("JWT_SECRET_KEY NOT FOUND")
@@ -46,7 +44,7 @@ async def verify_jwt(session:Annotated[str|None, Cookie()] = None):
     try:
         cookie_val = decode(session,JWT_SECRET_KEY,algorithms=["HS256"])
     except Exception as e:
-        logger.warning(e)
+        logger.debug(f"jwt verification failed: {e}")
         return None
     return cookie_val
 

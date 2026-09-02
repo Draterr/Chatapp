@@ -1,5 +1,4 @@
 import aiomysql
-from sys import stdout
 from loguru import logger
 from typing import List
 import os
@@ -18,7 +17,6 @@ if APP_ENV != "DOCKER":
 else:
     host = "mysql_db"
     port = 3306
-logger.add(stdout,format="{time} {level} {message}",level="INFO")
 
 class Database:
     def __init__(self,user: str|None,password:str|None,database:str|None,host:str|None):
@@ -39,7 +37,7 @@ class Database:
                                                autocommit=False
                                                )
         except Exception as e:
-            logger.warning(e)
+            logger.exception("pool initialization failed")
             raise RuntimeError(e)
 
     @asynccontextmanager
@@ -110,14 +108,15 @@ class Database:
                 for user_id in chat_users:
                     await cur.execute(insert_chat_users,(chat_id,user_id))
                 return True
-        except Exception as e:
-            logger.warning(e)
+        except Exception:
+            logger.exception("insert_chat failed")
             raise HTTPException(status_code=400,detail="Something went wrong with creating chat")
 
     async def check_pending_messages(self,client_id:int):
-        query = ("SELECT b.chat_id,b.time_sent,b.content,b.sent_by,a.message_id "
+        query = ("SELECT b.chat_id,b.time_sent,b.content,b.sent_by,a.message_id,c.display_name "
                  "FROM message_status as a "
                  "INNER JOIN messages as b ON a.message_id = b.message_id "
+                 "INNER JOIN users as c ON c.user_id = b.sent_by "
                  "WHERE receiver_id = %s AND status = 'NOT-DELIVERED'")
         async with self._transaction() as cur:
             await cur.execute(query,(client_id,))

@@ -3,11 +3,14 @@ print(load_dotenv()) #load the environment variables in the main module so that 
 from fastapi import FastAPI
 from routers import users,websocket,chats
 from db import connection
+from loguru import logger
+from sys import stdout
 
 app = FastAPI()
 app.include_router(users.router)
 app.include_router(websocket.wsroute)
 app.include_router(chats.chats)
+logger.add(stdout,format="{time} {level} {message}",level="INFO")
 
 @app.on_event("startup")
 async def db_connect():

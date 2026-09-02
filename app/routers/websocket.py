@@ -1,12 +1,11 @@
-from sys import stdout
-from loguru import logger
 import asyncio
+from loguru import logger
 from datetime import datetime,timezone
 from typing import Annotated
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect,Depends,HTTPException
 from fastapi.encoders import jsonable_encoder
 import json
-from typing import List
+from typing import List,Literal
 from pydantic import BaseModel
 from db import connection
 from dependencies import sort_by_time
@@ -14,18 +13,16 @@ from routers.users import verify_jwt
 from pubsub import *
 
 
-logger.add(stdout,format="{time} {level} {message}",level="INFO")
 wsroute = APIRouter()
 
-class SuccessMessage(BaseModel):
+class MessageFrame(BaseModel):
+    type: Literal['message']
     message_id: str
-    sender_id: int 
+    sender_id: int
+    sender_name: str
     message: str
     time_sent:str
-
-class SuccessResponse(BaseModel):
-    messages: List[SuccessMessage]
-    timestamp: str
+    chat_id:str
 
 class AcknowledgeResponse(BaseModel):
     type:str
@@ -68,7 +65,7 @@ class WebsocketManager:
             content = message["data"]
             logger.debug(self.chats)
             for _,websocket in self.chats.get(chat_id,[]):
-                await websocket.send_json(content,mode="text")
+                await websocket.send_text(content)   # content is already a JSON string
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)
@@ -120,20 +117,22 @@ async def start_pubsub_reader():
         asyncio.create_task(manager.pubsub_reader())
         
 
-async def user_send_message(sender_id:int,chat_id:str,message:str):
+
+async def user_send_message(sender_name:str,sender_id:int,chat_id:str,message:str):
     time = datetime.now(timezone.utc)
     time_sent = time.strftime("%Y-%m-%d %H:%M:%S.%f")
     try:
-        await connection.insert_message(sender_id,time_sent,chat_id,message)
-    except Exception as e:
-        logger.warning(e)                                  # log the real cause
+        message_id = await connection.insert_message(sender_id,time_sent,chat_id,message)
+    except Exception:
+        logger.exception("insert_message failed")          # full traceback for the real cause
         response = jsonable_encoder(ErrorResponse(type="error",code="DB_INSERT_ERROR",detail="could not save message"))
         await manager.notify_status(response,sender_id)    # generic detail to the client
         return
     time_stamp = time.strftime("%H:%M:%S")
     response = jsonable_encoder(AcknowledgeResponse(type="ack",content={"message":message,"chat_id":chat_id},timestamp=time_stamp))
     await manager.notify_status(response,sender_id)
-    await manager.send_message(message,chat_id)
+    response = jsonable_encoder(MessageFrame(type="message",message_id=str(message_id),sender_id=sender_id,sender_name=sender_name,message=message,time_sent=time_sent,chat_id=chat_id))
+    await manager.send_message(json.dumps(response),chat_id)
 
 
 async def deliver_pending_messages(messages:tuple,receiver_id:int):
@@ -142,11 +141,11 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
     time_stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
     objs = {}
     #unpack the tuples returned by the database and put the individual messages in each chat_id 
-    for chat_id,time_sent,content,sender,message_id in messages:
+    for chat_id,time_sent,content,sender,message_id,sender_name in messages:
         if chat_id in objs:
             continue
-        objs[chat_id] = SuccessResponse(messages=[],timestamp=time_stamp)
-    #populate each SuccessMessage with the message information
+        objs[chat_id] = []
+    #populate each MessageFrame with the message information
     message_ids = []
     for message in messages:
         chat_id = message[0]
@@ -154,26 +153,26 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
         content = message[2]
         sender = message[3]
         message_id = message[4]
-        tmp = SuccessMessage(message_id=message_id,sender_id=sender,message=content,time_sent=time_sent.strftime("%Y-%m-%d %H:%M:%S.%f"))
-        objs[chat_id].messages.append(tmp)
+        sender_name = message[5]
+        tmp = MessageFrame(type="message",message_id=message_id,sender_id=sender,message=content,time_sent=time_sent.strftime("%Y-%m-%d %H:%M:%S.%f"),chat_id=chat_id,sender_name=sender_name)
+        objs[chat_id].append(tmp)
         message_ids.append(message_id)
     #Sort the messages by the time sent
     for chat_id,value in objs.items():
-        objs[chat_id].messages = sort_by_time(value.messages)
+        objs[chat_id] = sort_by_time(value)
     logger.info(f"{sender} sent {receiver_id}: {content}")
     logger.debug(objs)
     await manager.active_connections.get(receiver_id).send_json(jsonable_encoder(objs),mode="text")
     await connection.set_delivery_status(message_ids,receiver_id)
 
 
-async def send_message(client_id:str,websocket:WebSocket):
+async def send_message(username:str,client_id:str,websocket:WebSocket):
     while True:
         data = await websocket.receive_json()
         logger.info(f"{client_id} said {data}")
-        client_id = data["client_id"]
         message = data["message"]
         chat_id = data["chat_id"]
-        await user_send_message(client_id,chat_id,message)
+        await user_send_message(username,client_id,chat_id,message)
 
 @wsroute.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, Depends(verify_jwt)]):
@@ -187,8 +186,8 @@ async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, 
     try:
         chat_ids = await connection.get_chats(client_id)
         connect_status = await manager.connect(client_id,websocket,chat_ids)
-    except Exception as e:
-        logger.error(e)                            # DB/connect failure before registration
+    except Exception:
+        logger.exception("connect failed")         # DB/connect failure before registration
         return                                     # nothing registered yet -> no cleanup needed
     if not connect_status:
         return                                     # duplicate connection — this socket was never
@@ -197,11 +196,11 @@ async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, 
         pending_messages = await connection.check_pending_messages(client_id)
         if pending_messages:
             await deliver_pending_messages(pending_messages,client_id)
-        await send_message(client_id,websocket)
+        await send_message(username,client_id,websocket)
     except WebSocketDisconnect:
         logger.info(f"{username} disconnected")
-    except Exception as e:
-        logger.error(e)
+    except Exception:
+        logger.exception("websocket loop error")
     finally:
         await manager.disconnect(client_id,websocket)
 
