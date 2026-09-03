@@ -57,15 +57,20 @@ class WebsocketManager:
         return True
 
     async def pubsub_reader(self):
-        async for message in self.pubsub_instance.pubsub.listen():
-            if message["type"] != "message":
+        # get_message() poll (not listen()): listen() is an async generator that breaks
+        # ("generator already running") when connect()/disconnect() subscribe or unsubscribe
+        # on the same PubSub from other tasks. timeout=1.0 blocks efficiently (no busy-loop),
+        # ignore_subscribe_messages skips (un)subscribe confirmations.
+        pubsub = self.pubsub_instance.pubsub
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message is None:
                 continue
             logger.info("got message "+str(message))
             chat_id = message["channel"]
             content = message["data"]                 # already a JSON string
             message_id = json.loads(content)["message_id"]
-            logger.debug(self.chats)
-            for receiver_id,websocket in self.chats.get(chat_id,[]):
+            for receiver_id,websocket in list(self.chats.get(chat_id,[])):
                 try:
                     await websocket.send_text(content)
                 except Exception:
@@ -80,10 +85,6 @@ class WebsocketManager:
     async def notify_status(self,error_message:ErrorResponse,sender_id:int):
         sender_websocket = self.active_connections.get(sender_id)
         await sender_websocket.send_json(error_message,mode="text")
-
-    async def broadcast(self,message:str):
-        for i in self.active_connections:
-            await i.send_json(message) 
 
     async def disconnect(self,client_id:int,websocket):
         self.active_connections.pop(client_id,None)
@@ -102,33 +103,27 @@ class WebsocketManager:
     def __str__(self):
         return str(self.active_connections)
 
-class MessageManager:
-    def __init__(self,message):
-        self.messagecontext = json.loads(message)
-    def get_client_id(self):
-        return self.messagecontext["client_id"]
-    def get_message(self):
-        return self.messagecontext["message"]
-    def get_chat_id(self):
-        return self.messagecontext["chat_id"]
-    def __str__(self):
-        return json.dumps(self.messagecontext)
-
 manager = WebsocketManager()
 @wsroute.on_event("startup")
 async def start_pubsub_reader():
-    await manager.pubsub_instance.subscribe("init")
-    message = await manager.pubsub_instance.pubsub.get_message()
-    if message is not None and message["type"] == "subscribe":
-        asyncio.create_task(manager.pubsub_reader())
+    # redis-py's pubsub.listen() runs `while self.subscribed`, so the reader would
+    # exit instantly if started with no channels subscribed. Hold a permanent
+    # keepalive subscription so listen() stays alive even when every user is offline.
+    await manager.pubsub_instance.subscribe("__keepalive__")
+    asyncio.create_task(manager.pubsub_reader())
         
 
 
 async def user_send_message(sender_name:str,sender_id:int,chat_id:str,message:str):
-    time = datetime.now(timezone.utc)
-    time_sent = time.strftime("%Y-%m-%d %H:%M:%S.%f")
+    time = datetime.now(timezone.utc).replace(tzinfo=None)   # naive UTC
+    time_sent = time.strftime("%Y-%m-%d %H:%M:%S.%f")           # MySQL-friendly for storage
     try:
         message_id = await connection.insert_message(sender_id,time_sent,chat_id,message)
+    except PermissionError:
+        logger.exception("User not part of chat")          # full traceback for the real cause
+        response = jsonable_encoder(ErrorResponse(type="error",code="NOT_A_MEMBER",detail="User not part of Chat"))
+        await manager.notify_status(response,sender_id)    # generic detail to the client
+        return
     except Exception:
         logger.exception("insert_message failed")          # full traceback for the real cause
         response = jsonable_encoder(ErrorResponse(type="error",code="DB_INSERT_ERROR",detail="could not save message"))

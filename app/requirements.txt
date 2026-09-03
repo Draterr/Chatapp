@@ -3,7 +3,7 @@ annotated-types==0.7.0
 anyio==4.10.0
 asyncio==4.0.0
 asyncio-redis==0.16.0
-bcrypt==4.3.0
+bcrypt==4.0.1
 certifi==2025.8.3
 cffi==2.0.0
 click==8.2.1

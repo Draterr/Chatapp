@@ -89,10 +89,15 @@ class Database:
     #WEBSOCKET RELATED
     async def insert_message(self,sender_id:int,time_sent,chat_id:str,message:str):
         message_id = uuid.uuid4()
+        check_membership = "SELECT 1 FROM chat_users WHERE user_id = %s AND chat_id = %s"
         insert_message = "INSERT INTO messages(message_id,sent_by,time_sent,chat_id,content) VALUES(%s,%s,%s,%s,%s)"
         get_users = "SELECT user_id FROM chat_users WHERE chat_id = %s AND user_id != %s"
         insert_message_status = "INSERT INTO message_status(message_id,receiver_id) VALUES(%s,%s)"
         async with self._transaction() as cur:
+            await cur.execute(check_membership,(sender_id,chat_id))
+            membership = await cur.fetchall()
+            if len(membership) <= 0:
+                raise PermissionError("User not Part of Chat")
             await cur.execute(insert_message,(message_id,sender_id,time_sent,chat_id,message))
             await cur.execute(get_users,(chat_id,sender_id))
             user_ids = await cur.fetchall()
