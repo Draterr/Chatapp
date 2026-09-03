@@ -101,13 +101,22 @@ that is what `docker_rebuild.sh` is for. `database/Dockerfile` (dev) also loads 
 ### Frontend (`static/`)
 
 Plain HTML/CSS/JS, no build step or framework; nginx bind-mounts the directory so edits are live.
+Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-mapping rules.
 
-- `static/login/index.html` + `js/login.js` — the only page wired to the real backend
-  (`/api/login`, `/api/register`); it branches on the exact response `message` strings.
-- `static/index.html` + `js/chat.js` — the main chat UI, ported from a design mock and **entirely
-  driven by the in-file `DATA` mock object**. `USE_WS` is `false` and `connectWebSocket()` is a
-  stub. The remaining work is enumerated in the "BACKEND INTEGRATION POINTS" comment block at the
-  bottom of `chat.js` (it references `BACKEND_TODO.md`, which is gitignored and may be absent).
+- `index.html` + `css/app.css` — two-pane "iMessage clean" shell (sidebar + chat + composer),
+  tokens on `:root`, dark theme via `prefers-color-scheme`, `body[data-view]` toggles the
+  single-pane mobile layout.
+- `js/api.js` — `API.apiFetch()` adds the `/api` prefix and `credentials: "include"`; a 403
+  triggers one single-flight `POST /api/refresh` and a retry, else redirects to `/login/`.
+- `js/ws.js` — `WS.connect()` to `ws://<host>:8000/ws` (direct, not via nginx), backoff
+  reconnect (runs `API.getMe()` first so an expired session is refreshed before the handshake),
+  routes the four inbound frame shapes (`message`/`ack`/`error`/type-less pending map).
+- `js/app.js` — `state`, rendering, events, boot. Own messages render only on the echoed
+  `message` frame (never optimistically). Unread counts are client-side after boot; "older"
+  pages use `offset = loaded count`. Scripts load in order: api → ws → app.
+- `login/` — sign-in / create-account card; branches on HTTP status, not message strings.
+- "New chat" is a dev affordance taking raw user ids — there is no user-search endpoint yet.
+- `client1.html` / `client2.html` remain as bare WS harnesses.
 
 ## Entrypoint scripts
 
