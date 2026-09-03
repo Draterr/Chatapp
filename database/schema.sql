@@ -44,3 +44,13 @@ CREATE TABLE message_status(
   FOREIGN KEY(receiver_id) REFERENCES users(user_id),
   FOREIGN KEY(message_id) REFERENCES messages(message_id)
 );
+
+CREATE TABLE refresh_tokens(
+  token_hash char(64) NOT NULL,               -- sha256 hex of the raw token; raw value never stored
+  user_id int NOT NULL,
+  expires_at DATETIME(6) NOT NULL,
+  revoked BOOLEAN NOT NULL DEFAULT FALSE,      -- logout / rotation flips this true
+  created_at DATETIME(6) NOT NULL,
+  PRIMARY KEY(token_hash),
+  FOREIGN KEY(user_id) REFERENCES users(user_id)
+);

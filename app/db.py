@@ -56,12 +56,9 @@ class Database:
 
     async def check_credentials(self,username:str,password:str):
         query = "SELECT password,role,user_id FROM users WHERE username = %s"
-        try:
-            async with self._transaction() as cur:
-                await cur.execute(query,(username,))
-                stored_password = await cur.fetchone()
-        except Exception:
-            raise HTTPException(status_code=400,detail="Something went wrong with SQL query")
+        async with self._transaction() as cur:
+            await cur.execute(query,(username,))
+            stored_password = await cur.fetchone()
 
         if stored_password and bcrypt.verify(password,stored_password[0]):
             return (stored_password[1],stored_password[2])
@@ -85,6 +82,15 @@ class Database:
             if row is None:
                 raise HTTPException(status_code=404,detail="User not found")
             return {"display_name":row[0],"avatar_url":row[1]}
+    
+    async def get_user_info(self,*,user_id: int):
+        query = "SELECT * FROM users WHERE user_id = %s"
+        async with self._transaction() as cur:
+            await cur.execute(query,(user_id,))
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404,detail="User not found")
+            return row
 
     #WEBSOCKET RELATED
     async def insert_message(self,sender_id:int,time_sent,chat_id:str,message:str):
@@ -108,15 +114,11 @@ class Database:
     async def insert_chat(self,chat_id:str,chat_name:str,chat_users:list[int]):
         insert_chat = "INSERT INTO chats(chat_id,chat_name) VALUES(%s,%s)"
         insert_chat_users = "INSERT INTO chat_users(chat_id,user_id) VALUES(%s,%s)"
-        try:
-            async with self._transaction() as cur:
-                await cur.execute(insert_chat,(chat_id,chat_name))
-                for user_id in chat_users:
-                    await cur.execute(insert_chat_users,(chat_id,user_id))
-                return True
-        except Exception:
-            logger.exception("insert_chat failed")
-            raise HTTPException(status_code=400,detail="Something went wrong with creating chat")
+        async with self._transaction() as cur:
+            await cur.execute(insert_chat,(chat_id,chat_name))
+            for user_id in chat_users:
+                await cur.execute(insert_chat_users,(chat_id,user_id))
+            return True
 
     async def check_pending_messages(self,client_id:int):
         query = ("SELECT b.chat_id,b.time_sent,b.content,b.sent_by,a.message_id,c.display_name "
@@ -181,5 +183,30 @@ class Database:
         has_more = len(messages) == limit          # a full page -> assume more exist
         messages.reverse()                         # DESC from SQL -> oldest->newest for display
         return {"data":messages,"has_more":has_more}
+    
+    async def insert_refresh_token(self,*,token_hash: str,user_id: int, expires_at: str, created_at: str) -> None:
+        query = "INSERT INTO refresh_tokens(token_hash,user_id,expires_at,revoked,created_at) VALUES (%s,%s,%s,%s,%s)"
+        async with self._transaction() as cur:
+            await cur.execute(query,(token_hash,user_id,expires_at,False,created_at))
+
+    async def revoke_refresh_token(self,user_id: int) -> None:
+        query = "UPDATE refresh_tokens SET revoked = True ,expires_at = %s WHERE user_id = %s"
+        async with self._transaction() as cur:
+            await cur.execute(query,(datetime.now().isoformat(),user_id))
+
+    async def refresh_refresh_token(self,*,user_id: int,old_token_hash: str, new_refresh_token: str,expires_at: str,created_at: str) -> None:
+        update_query = "UPDATE refresh_tokens SET revoked = True, expires_at = NOW() where user_id = %s and token_hash = %s"
+        insert_query = "INSERT INTO refresh_tokens(token_hash,user_id,expires_at,revoked,created_at) VALUES (%s,%s,%s,%s,%s)"
+        async with self._transaction() as cur:
+            await cur.execute(update_query,(user_id,old_token_hash))
+            await cur.execute(insert_query,(new_refresh_token,user_id,expires_at,False,created_at))
+
+    async def get_user_id_with_refresh(self,*,token_hash: str) -> int:
+        async with self._transaction() as cur:
+            await cur.execute("SELECT user_id FROM refresh_tokens WHERE token_hash=%s AND revoked=False AND expires_at >= NOW()",(token_hash,))
+            out = await cur.fetchone()
+            if not out:
+                raise HTTPException(status_code=404,detail="A user with this refresh token is not found")
+        return out[0]
 
 connection = Database(user,password,database,host)

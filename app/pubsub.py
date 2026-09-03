@@ -13,6 +13,9 @@ class Pubsub:
     async def subscribe(self,chat_id:str):
         await self.pubsub.subscribe(chat_id)
 
+    async def psubscribe(self,pattern:str):
+        await self.pubsub.psubscribe(pattern)
+
     async def unsubscribe(self,chat_id:str):
         await self.pubsub.unsubscribe(chat_id)
 

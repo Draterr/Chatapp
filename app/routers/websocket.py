@@ -50,32 +50,35 @@ class WebsocketManager:
                 self.chats[chat_id] = [(client_id,websocket)]
             else:
                 self.chats[chat_id].append((client_id,websocket))
-            await self.pubsub_instance.subscribe(chat_id)
-            logger.info(f"{client_id} sub to {chat_id}")
+            # NOTE: no pubsub.subscribe() here — the reader psubscribes("*") once at
+            # startup and owns the connection exclusively. Touching pubsub from this
+            # request task races the reader's read ("readuntil() already waiting").
         logger.info(f"{client_id} joined chat {chat_ids}")  
         self.active_connections.update({client_id:websocket})
         return True
 
     async def pubsub_reader(self):
-        # get_message() poll (not listen()): listen() is an async generator that breaks
-        # ("generator already running") when connect()/disconnect() subscribe or unsubscribe
-        # on the same PubSub from other tasks. timeout=1.0 blocks efficiently (no busy-loop),
-        # ignore_subscribe_messages skips (un)subscribe confirmations.
         pubsub = self.pubsub_instance.pubsub
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message is None:
-                continue
-            logger.info("got message "+str(message))
-            chat_id = message["channel"]
-            content = message["data"]                 # already a JSON string
-            message_id = json.loads(content)["message_id"]
-            for receiver_id,websocket in list(self.chats.get(chat_id,[])):
-                try:
-                    await websocket.send_text(content)
-                except Exception:
-                    continue                          # dead socket -> leave NOT-DELIVERED, replays on reconnect
-                await connection.set_delivery_status([message_id],receiver_id)
+        try:
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message is None:
+                    continue
+                chat_id = message["channel"]
+                subscribers = self.chats.get(chat_id)
+                if not subscribers:
+                    continue                          # no local sockets for this chat -> ignore
+                logger.info("got message "+str(message))
+                content = message["data"]             # already a JSON string
+                message_id = json.loads(content)["message_id"]
+                for receiver_id,websocket in list(subscribers):
+                    try:
+                        await websocket.send_text(content)
+                    except Exception:
+                        continue                      # dead socket -> leave NOT-DELIVERED, replays on reconnect
+                    await connection.set_delivery_status([message_id],receiver_id)
+        except asyncio.CancelledError:
+            return                                    # clean shutdown: stop reading before the conn closes
 
 
     async def send_message(self,message:str,chat_id:str):
@@ -97,8 +100,7 @@ class WebsocketManager:
             logger.info(f"{client_id} removed from {chat_id}")
             if not members:                       
                 del self.chats[chat_id]
-                await self.pubsub_instance.unsubscribe(chat_id)
-                logger.info(f"{chat_id} empty; unsubscribed")
+                logger.info(f"{chat_id} empty; dropped")
 
     def __str__(self):
         return str(self.active_connections)
@@ -106,11 +108,30 @@ class WebsocketManager:
 manager = WebsocketManager()
 @wsroute.on_event("startup")
 async def start_pubsub_reader():
-    # redis-py's pubsub.listen() runs `while self.subscribed`, so the reader would
-    # exit instantly if started with no channels subscribed. Hold a permanent
-    # keepalive subscription so listen() stays alive even when every user is offline.
-    await manager.pubsub_instance.subscribe("__keepalive__")
-    asyncio.create_task(manager.pubsub_reader())
+    # Subscribe once to ALL channels (chat_ids) with a pattern; the reader then owns the
+    # pubsub connection alone. connect()/disconnect() only mutate self.chats, never pubsub.
+    await manager.pubsub_instance.psubscribe("*")
+    manager.reader_task = asyncio.create_task(manager.pubsub_reader())
+
+
+@wsroute.on_event("shutdown")
+async def stop_pubsub_reader():
+    # Orderly shutdown so the reader isn't parked in get_message()'s readuntil() when the
+    # redis connection is torn down. Cancelling a blocked redis read raises a RuntimeError
+    # (not CancelledError) from redis-py, so suppress whatever `await task` raises — awaiting
+    # it also "retrieves" the exception, silencing the "Task exception was never retrieved" log.
+    task = getattr(manager, "reader_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+    try:
+        await manager.pubsub_instance.pubsub.aclose()
+        await manager.pubsub_instance.r.aclose()
+    except Exception:
+        pass
         
 
 
