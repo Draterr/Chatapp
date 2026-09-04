@@ -101,6 +101,16 @@ because `connect()` may already have registered that same socket.
 Note: the send path trusts the client-supplied `client_id` in the frame instead of the session's;
 this is a known gap, tracked as item #5 in the `chat.js` integration comments.
 
+**Known gap — one socket per user.** `WebsocketManager.connect()` returns `None` when
+`client_id` is already in `active_connections`, and `websocket_endpoint` has already called
+`websocket.accept()` by then, so it `return`s on a duplicate **without closing the socket and
+without ever reading from it**. The client sees `onopen` and `WS.isOpen() === true` while every
+frame it sends goes nowhere and nothing is ever fanned out to it. Reproduce it by opening the app
+in two tabs as the same user: the second tab is silently dead, and reconnecting doesn't help
+because the first tab still holds the slot. It also fires transiently when a reconnect races the
+old handler's `finally: disconnect()`. The frontend can only make it visible, not fix it —
+`app.js` toasts and forces a reconnect when a send goes unacked for `ACK_TIMEOUT_MS`.
+
 Note: `POST /chat/delete_chat` (`app/routers/chats.py`) is an unfinished stub — its membership check
 compares a `str` against the one-tuples `get_chats()` returns, so it always raises a bare
 `PermissionError` and 500s, and `connection.delete_chat()` holds no query. Nothing calls it yet.
@@ -124,13 +134,22 @@ that is what `docker_rebuild.sh` is for. `database/Dockerfile` (dev) also loads 
 ### Frontend (`static/`)
 
 Plain HTML/CSS/JS, no build step or framework; nginx bind-mounts the directory so edits are live.
-Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-mapping rules.
+Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-mapping rules; the
+"v2 changes" note at the top of that file lists where the shipped UI has moved past it.
 
-- `index.html` + `css/app.css` — two-pane "iMessage clean" shell (sidebar + chat + composer),
-  tokens on `:root`, dark theme via `prefers-color-scheme`, `body[data-view]` toggles the
-  single-pane mobile layout.
+- `index.html` + `css/app.css` — two-pane "warm editorial" shell (sidebar + chat + composer).
+  All colour is tokens on `:root` with the dark theme redefining the same tokens in one
+  `prefers-color-scheme` block; `body[data-view]` toggles the single-pane mobile layout.
+  Inter (UI) and Fraunces (display: wordmark, chat title, dialog and empty-state headlines) load
+  from Google Fonts with real fallback stacks. The chat header is a `backdrop-filter` strip the
+  messages scroll under and the composer floats over them, so `.messages` reserves
+  `--head-h` at the top and `--composer-h` (kept current by a `ResizeObserver`) at the bottom.
+  `.app` needs `grid-template-rows: minmax(0,1fr)` and `min-height: 0` on both panes or the inner
+  scroll containers stop scrolling. Two `<template>` elements hold the empty-state SVGs, because
+  the `el()` helper uses `createElement` and can't build namespaced SVG.
 - `js/api.js` — `API.apiFetch()` adds the `/api` prefix and `credentials: "include"`; a 403
   triggers one single-flight `POST /api/refresh` and a retry, else redirects to `/login/`.
+  `API.searchUsers(q, { limit, signal })` wraps `GET /api/users?q=`.
 - `js/ws.js` — `WS.connect()` to `ws://<host>:8000/ws` (direct, not via nginx), backoff
   reconnect (runs `API.getMe()` first so an expired session is refreshed before the handshake),
   routes the five inbound frame shapes
@@ -138,12 +157,27 @@ Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-map
 - `js/app.js` — `state`, rendering, events, boot. Own messages render only on the echoed
   `message` frame (never optimistically). Unread counts are client-side after boot; "older"
   pages use `offset = loaded count`. A `chat_created` frame triggers `refreshChats()` when the chat
-  is unknown, which is why creating a chat no longer forces a `WS.reconnect()`. Scripts load in
-  order: api → ws → app.
+  is unknown. Scripts load in order: api → ws → app.
+  - `parseTime(s)` is the single entry point for every timestamp: it takes a `Date`, ISO with an
+    offset, or ISO without one (treated as naive UTC), normalises the fractional seconds to the
+    three digits `Date` is specified to accept, expands a compact `+0000` offset, and returns an
+    Invalid Date instead of throwing. `fullStamp()` builds the `title` tooltips (full local date,
+    time and zone abbreviation) on `.meta` timestamps and sidebar times.
+  - `avatarEl()` is the one avatar: a hued initials circle, overlaid by `<img>` when `avatar_url`
+    is set, with the image removing itself on error. DM avatars are hued by the other person, not
+    the chat, so a face looks the same in the picker, the sidebar and the header.
+  - An unacked send after `ACK_TIMEOUT_MS` toasts and forces a reconnect — see the duplicate-socket
+    gap under "Messaging pipeline".
 - `login/` — sign-in / create-account card; branches on HTTP status, not message strings.
-- "New chat" is still a dev affordance taking raw user ids. `GET /api/users?q=` (see Auth) now
-  exists on the backend but is not wired into the dialog yet, and `index.html` still carries the
-  "no user directory" copy and TODO.
+- **New conversation** is a real people picker (`#newChatDialog`): debounced 150 ms search against
+  `GET /api/users?q=` with an `AbortController` per keystroke, stale responses dropped by comparing
+  the query against the field, keyboard nav (↑/↓/Enter/Esc, Backspace removes the last chip), and
+  removable chips. One person selected is a DM, two or more a named group. Two client-side
+  workarounds for backend gaps live here: a DM is deduped against `state.chats` before creating
+  (the server has no uniqueness check), and because `POST /create_chat` returns no `chat_id` the new
+  chat is identified as whichever id is missing from a snapshot taken before the call —
+  `adoptNewChat()` is single-flight so the post-create refresh and the `chat_created` frame can race
+  harmlessly.
 - `client1.html` / `client2.html` remain as bare WS harnesses.
 
 ## Entrypoint scripts

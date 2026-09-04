@@ -526,7 +526,24 @@
     }
   }
 
+  // How long to wait for the server's ack before assuming the frame went nowhere.
+  const ACK_TIMEOUT_MS = 8000;
   let sendingTimer = null;
+
+  function armAckTimeout() {
+    clearTimeout(sendingTimer);
+    sendingTimer = setTimeout(() => {
+      if (state.sending === 0) return;
+      // The socket reports open but nothing came back. That happens when the server
+      // accepted a second socket for this user and never serviced it -- the frame
+      // went into a black hole. Reconnecting gets us a socket that is actually read.
+      state.sending = 0;
+      updateComposer();
+      toast("Couldn't confirm that message — reconnecting");
+      WS.reconnect();
+    }, ACK_TIMEOUT_MS);
+  }
+
   function sendCurrent() {
     const text = els.composerInput.value.trim();
     if (!text || !state.activeChatId) return;
@@ -538,9 +555,7 @@
     autoGrow();
     state.sending++;
     updateComposer();
-    // Safety net: never leave the hint stuck if an ack is lost.
-    clearTimeout(sendingTimer);
-    sendingTimer = setTimeout(() => { state.sending = 0; updateComposer(); }, 8000);
+    armAckTimeout();
   }
 
   function autoGrow() {
@@ -615,11 +630,13 @@
 
     WS.on("ack", () => {
       if (state.sending > 0) state.sending--;
+      if (state.sending === 0) clearTimeout(sendingTimer);
       updateComposer();
     });
 
     WS.on("error", (e) => {
       if (state.sending > 0) state.sending--;
+      if (state.sending === 0) clearTimeout(sendingTimer);
       updateComposer();
       toast(e.detail || e.code || "Message failed");
     });

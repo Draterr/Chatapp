@@ -1,5 +1,25 @@
 # Frontend Build Spec
 
+> **v2 changes — read this first.** The shipped frontend has moved past parts of this spec.
+> Where they disagree, the code and `CLAUDE.md`'s "Frontend (`static/`)" section win:
+>
+> - **§1 visual direction is superseded.** "iMessage clean" was replaced by a warm, editorial
+>   palette (warm paper, deep-vermilion accent, Inter + Fraunces). The token *names* and the
+>   structure — two panes, `body[data-view]` mobile switch, tokens on `:root`, dark theme via
+>   `prefers-color-scheme` — still hold; the values in the §1 table do not.
+> - **§6.1 is out of date.** `time_sent` now carries an explicit UTC offset and microsecond
+>   precision (`2026-09-03T12:28:31.590965+00:00`). Do not append `Z` blindly — use
+>   `parseTime()` in `app.js`, which handles both shapes.
+> - **§7 "no user search" is out of date.** `GET /api/users?q=<prefix>&limit=<n>` exists and the
+>   "New conversation" dialog is a real people picker. The raw-user-id dev affordance is gone.
+> - **Still-true gaps:** no presence, no typing indicators, no read receipts, no reactions, no
+>   message edit/delete, avatars are initials unless `avatar_url` is set. `POST /create_chat`
+>   still returns no `chat_id`, there is still no server-side DM-uniqueness check, and the
+>   backend still services only one WebSocket per user (see `CLAUDE.md`).
+>
+> Everything else below — the API/WS shapes, the auth and refresh flow, the data-mapping rules,
+> the echo rule — is current.
+
 A complete, self-contained brief for building the chat app's frontend. Everything you need
 is in this file — you do not need to read the conversation it came from. Read the backend
 source under `app/` only to confirm details; the shapes below are authoritative as of writing.

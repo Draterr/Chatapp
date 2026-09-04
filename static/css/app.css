@@ -40,7 +40,7 @@
   --overlay: rgba(48, 33, 24, 0.38);
   --error: #a3231b;
 
-  /* empty-state illustrations */
+  /* empty-state illustrations — consumed by the inline SVGs in index.html */
   --art-fill: #efe6d8;
   --art-line: #c9b79f;
   --art-accent: #f6ded6;
@@ -50,7 +50,7 @@
   --shadow-soft: 0 1px 2px rgba(64, 40, 24, 0.05), 0 8px 24px rgba(64, 40, 24, 0.08);
   --shadow-lift: 0 2px 6px rgba(64, 40, 24, 0.08), 0 18px 48px rgba(64, 40, 24, 0.16);
 
-  /* per-user avatar hue comes from hueFor(); these tune it into the palette */
+  /* per-user avatar hue comes from hueFor() in app.js, which reads these two */
   --avatar-sat: 32%;
   --avatar-lum: 45%;
 
@@ -348,7 +348,7 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .chat-head {
-    background: color-mix(in srgb, var(--paper) 72%, transparent);
+    background: color-mix(in srgb, var(--paper) 86%, transparent);
     -webkit-backdrop-filter: blur(20px) saturate(1.06);
     backdrop-filter: blur(20px) saturate(1.06);
   }
