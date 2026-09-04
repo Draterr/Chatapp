@@ -6,3 +6,4 @@ venv/*
 log.log
 .DS_Store
 BACKEND_TODO.md
+TODO.md

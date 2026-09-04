@@ -119,4 +119,13 @@ async def refresh_token(refresh_token: Annotated[str|None, Cookie()], response: 
     await connection.refresh_refresh_token(user_id=uid,old_token_hash=old_hash,new_refresh_token=new_hash,expires_at=expires_at.isoformat(),created_at=created_at.isoformat())
     set_auth_cookies(response,access_jwt,access_expire,raw,expires_at)
 
+@router.get("/users",tags=["users"])
+async def search_user_by_name(session: Annotated[dict|None, Depends(verify_jwt)],q: str,limit: int=10):
+    if not session:
+        raise HTTPException(status_code=403,detail="Unauthorized")
+    uid = session["user_id"]
+    q = q.strip()
+    q = q.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")
+    limit = max(1,min(limit,25))
+    return await connection.search_username(input=q,limit=limit,searcher_id=uid)
 
