@@ -1,26 +1,43 @@
+/* login.css — same palette, type and card treatment as the app shell. */
+
 :root {
-  --bg: #f5f5f7;
-  --card: #ffffff;
-  --border: #e5e5ea;
-  --accent: #007aff;
-  --text: #000000;
-  --text-secondary: #8e8e93;
-  --input-bg: #ffffff;
-  --input-border: #d1d1d6;
-  --seg-bg: #e9e9eb;
-  --error: #d93025;
-  --font: -apple-system, "SF Pro Text", system-ui, "Segoe UI", Roboto, sans-serif;
+  --paper: #faf7f2;
+  --surface: #fffdfa;
+  --line: #e4d9c9;
+  --ink: #221c16;
+  --ink-soft: #6f6154;
+  --accent: #b03a2e;
+  --accent-strong: #8f2f24;
+  --accent-ink: #fffaf3;
+  --input-bg: #fffdfa;
+  --input-border: #e0d3c0;
+  --seg-bg: #f1e9dd;
+  --focus-ring: rgba(176, 58, 46, 0.13);
+  --error: #a3231b;
+  --glow: rgba(176, 58, 46, 0.10);
+  --shadow: 0 2px 6px rgba(64, 40, 24, 0.06), 0 24px 60px rgba(64, 40, 24, 0.12);
+
+  --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --display: "Fraunces", "Iowan Old Style", Georgia, "Times New Roman", serif;
 }
+
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #000000;
-    --card: #1c1c1e;
-    --border: #2c2c2e;
-    --text: #ffffff;
-    --input-bg: #2c2c2e;
-    --input-border: #3a3a3c;
-    --seg-bg: #2c2c2e;
-    --error: #ff6b6b;
+    --paper: #16120e;
+    --surface: #221b14;
+    --line: #332a20;
+    --ink: #f2ebe1;
+    --ink-soft: #a2917c;
+    --accent: #f4805e;
+    --accent-strong: #ffa385;
+    --accent-ink: #2a1109;
+    --input-bg: #1b150f;
+    --input-border: #3d3226;
+    --seg-bg: #1b150f;
+    --focus-ring: rgba(244, 128, 94, 0.18);
+    --error: #ff8f80;
+    --glow: rgba(244, 128, 94, 0.12);
+    --shadow: 0 2px 6px rgba(0, 0, 0, 0.5), 0 24px 60px rgba(0, 0, 0, 0.6);
   }
 }
 
@@ -29,96 +46,135 @@
 html, body {
   height: 100%;
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--paper);
+  color: var(--ink);
   font-family: var(--font);
   font-size: 15px;
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
 }
 body {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
 }
+/* the same warm glow + grain as the chat pane */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(90% 60% at 50% -8%, var(--glow) 0%, transparent 62%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.35'/%3E%3C/svg%3E");
+  background-size: auto, 120px 120px;
+  opacity: 0.55;
+}
+@media (prefers-color-scheme: dark) { body::before { opacity: 0.32; } }
 
 .card {
+  position: relative;
   width: 100%;
-  max-width: 360px;
-  padding: 32px 28px 28px;
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  background: var(--card);
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.06);
+  max-width: 384px;
+  padding: 34px 30px 30px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
   text-align: center;
+  animation: cardIn 260ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
-.logo {
+.mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
+  width: 52px;
+  height: 52px;
   border-radius: 16px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
 }
-.logo svg { width: 30px; height: 30px; }
+.mark svg { width: 26px; height: 26px; }
 
-h1 { margin: 14px 0 20px; font-size: 22px; font-weight: 700; }
+h1 {
+  margin: 16px 0 4px;
+  font-family: var(--display);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.tagline { margin: 0 0 22px; font-size: 13px; color: var(--ink-soft); }
 
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;
   padding: 3px;
   margin-bottom: 20px;
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--seg-bg);
 }
 .segmented button {
-  padding: 7px 0;
+  padding: 8px 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-soft);
   font: inherit;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
 }
 .segmented button.active {
-  background: var(--card);
-  color: var(--text);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(64, 40, 24, 0.14);
 }
 
-form { display: flex; flex-direction: column; gap: 12px; text-align: left; }
-label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--text-secondary); }
+form { display: flex; flex-direction: column; gap: 13px; text-align: left; }
+label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-soft); }
 input {
-  padding: 10px 12px;
+  padding: 11px 13px;
   border: 1px solid var(--input-border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--input-bg);
-  color: var(--text);
+  color: var(--ink);
   font: inherit;
   font-size: 15px;
   outline: none;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.18); }
+input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
 
 .error { min-height: 18px; font-size: 13px; color: var(--error); }
 
 .submit {
-  margin-top: 4px;
-  padding: 11px;
+  margin-top: 2px;
+  padding: 12px;
   border: 0;
-  border-radius: 12px;
+  border-radius: 13px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
   font: inherit;
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
+  transition: background 150ms ease, transform 110ms ease, opacity 150ms ease;
 }
-.submit:hover { filter: brightness(1.07); }
-.submit:disabled { opacity: 0.55; cursor: default; filter: none; }
+.submit:hover:not(:disabled) { background: var(--accent-strong); }
+.submit:active:not(:disabled) { transform: scale(0.985); }
+.submit:disabled { opacity: 0.55; cursor: default; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@keyframes cardIn { from { opacity: 0; transform: translateY(10px) scale(0.985); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

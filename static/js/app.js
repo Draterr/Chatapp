@@ -20,6 +20,7 @@
     everOpened: false,      // has the socket opened at least once
     pendingCounted: false,  // first pending map is already reflected in unread counts
     awaitingNewChat: null,  // Set of chat_ids from just before POST /create_chat
+    animate: new Set(),     // message_ids that just arrived live -- animated once, then cleared
   };
 
   // People picker (the "New conversation" dialog).
@@ -36,7 +37,8 @@
   const els = {
     meAvatar: $("meAvatar"), meName: $("meName"), logoutBtn: $("logoutBtn"),
     newChatBtn: $("newChatBtn"), convList: $("convList"),
-    backBtn: $("backBtn"), chatAvatar: $("chatAvatar"), chatTitle: $("chatTitle"),
+    backBtn: $("backBtn"), chatHead: $("chatHead"), chatFace: $("chatFace"),
+    chatTitle: $("chatTitle"), chatSub: $("chatSub"),
     connBanner: $("connBanner"), messages: $("messages"), chatEmpty: $("chatEmpty"),
     composer: $("composer"), composerInput: $("composerInput"), sendBtn: $("sendBtn"),
     sendingHint: $("sendingHint"), toast: $("toast"),
@@ -67,10 +69,13 @@
   }
 
   /* ---------- derived data (spec §6) ---------- */
+  // The hue is the spec's hash (so a person keeps their colour); saturation and
+  // lightness are pulled back and themed so the circles sit inside the warm
+  // palette instead of fighting it.
   function hueFor(id) {
     let h = 0;
     for (const c of String(id)) h = c.charCodeAt(0) + ((h << 5) - h);
-    return `hsl(${((h % 360) + 360) % 360} 45% 55%)`;
+    return `hsl(${((h % 360) + 360) % 360} var(--avatar-sat, 34%) var(--avatar-lum, 47%))`;
   }
 
   function initials(name) {
@@ -94,6 +99,13 @@
       node.append(img);
     }
     return node;
+  }
+
+  // SVG needs its own namespace, so the empty-state illustrations live in <template>
+  // elements in the markup and are cloned rather than built by el().
+  function art(id) {
+    const tpl = document.getElementById(id);
+    return tpl ? tpl.content.cloneNode(true) : null;
   }
 
   function isMine(msg) { return state.me && msg.sender_id === state.me.user_id; }
@@ -246,19 +258,24 @@
   function renderMe() {
     const name = state.me.display_name || state.me.user;
     els.meName.textContent = name;
-    els.meAvatar.replaceWith(
-      Object.assign(avatarEl(name, "user:" + state.me.user_id, state.me.avatar_url, "avatar-sm"),
-        { id: "meAvatar" }));
-    els.meAvatar = $("meAvatar");
+    const next = avatarEl(name, "user:" + state.me.user_id, state.me.avatar_url, "avatar-sm");
+    next.id = "meAvatar";
+    els.meAvatar.replaceWith(next);
+    els.meAvatar = next;
   }
 
   function renderChatList() {
     const list = els.convList;
     list.replaceChildren();
     if (!state.chats.length) {
-      list.append(el("div", { class: "list-empty" },
-        el("p", null, "No conversations yet."),
-        el("p", { class: "muted" }, "Chats you're added to will show up here.")));
+      const stage = el("div", { class: "stage" },
+        el("div", { class: "stage-art" }),
+        el("h2", { class: "stage-title" }, "Nothing here yet"),
+        el("p", { class: "stage-copy" }, "Start a conversation and it'll live in this list."),
+        el("button", { type: "button", class: "btn primary", onclick: openNewChat }, "New conversation"));
+      const a = art("artNoChats");
+      if (a) stage.firstChild.append(a);
+      list.append(stage);
       return;
     }
     for (const chat of state.chats) {
@@ -283,7 +300,9 @@
       },
         avatarEl(title, chatAvatarSeed(chat), (otherMember(chat) || {}).avatar_url),
         el("span", { class: "conv-main" },
-          el("span", { class: "conv-name" }, title),
+          el("span", { class: "conv-name-row" },
+            unread ? el("span", { class: "conv-dot", "aria-hidden": "true" }) : null,
+            el("span", { class: "conv-name" }, title)),
           el("span", { class: "conv-preview" }, preview)),
         el("span", { class: "conv-side" },
           el("span", { class: "conv-time", title: timeTitle || null }, time),
@@ -293,18 +312,38 @@
   }
 
   /* ---------- rendering: chat pane ---------- */
+  const STACK_MAX = 3;
+
   function renderHeader(chat) {
     if (!chat) {
+      els.chatHead.hidden = true;
       els.chatTitle.textContent = "";
-      els.chatAvatar.hidden = true;
+      els.chatSub.textContent = "";
+      els.chatFace.replaceChildren();
       return;
     }
+    els.chatHead.hidden = false;
     const title = chatTitle(chat);
     els.chatTitle.textContent = title;
-    const next = avatarEl(title, chatAvatarSeed(chat), (otherMember(chat) || {}).avatar_url, "avatar-sm");
-    next.id = "chatAvatar";
-    els.chatAvatar.replaceWith(next);
-    els.chatAvatar = next;
+    els.chatFace.replaceChildren();
+
+    const other = otherMember(chat);
+    if (!isGroup(chat)) {
+      // DM (or a degenerate one-member chat): just the other person. /chats members
+      // carry no username, so there is nothing honest to put in the subtitle.
+      els.chatFace.append(avatarEl(title, chatAvatarSeed(chat), other && other.avatar_url, "avatar-sm"));
+      els.chatSub.textContent = "";
+      return;
+    }
+    // Group: a stack of up to three member avatars, then "+N".
+    const members = chat.members || [];
+    const others = members.filter((m) => m.user_id !== state.me.user_id);
+    for (const m of others.slice(0, STACK_MAX)) {
+      els.chatFace.append(avatarEl(m.display_name, "user:" + m.user_id, m.avatar_url, "avatar-sm"));
+    }
+    const rest = others.length - STACK_MAX;
+    if (rest > 0) els.chatFace.append(el("span", { class: "stack-more" }, "+" + rest));
+    els.chatSub.textContent = members.length + " members";
   }
 
   function scrollToBottom() {
@@ -333,9 +372,14 @@
         state.loadingHistory[chatId] ? "Loading earlier messages…" : ""));
     }
     if (!msgs.length) {
-      box.append(el("div", { class: "messages-empty" },
-        el("p", null, "No messages yet."),
-        el("p", { class: "muted" }, "Say hi 👋")));
+      const who = chat ? chatTitle(chat) : "them";
+      const stage = el("div", { class: "stage" },
+        el("div", { class: "stage-art" }),
+        el("h2", { class: "stage-title" }, "Say hi to " + who),
+        el("p", { class: "stage-copy" }, "This is the very beginning. Write the first message below."));
+      const a = art("artSayHi");
+      if (a) stage.firstChild.append(a);
+      box.append(stage);
     }
 
     let prev = null;
@@ -350,19 +394,31 @@
       const groupStart = newDay || prev.sender_id !== m.sender_id || d - prevDate > GROUP_GAP_MS;
       const groupEnd = !next || next.sender_id !== m.sender_id || !sameDay(d, nextDate) || nextDate - d > GROUP_GAP_MS;
       const mine = isMine(m);
+      const text = String(m.message == null ? "" : m.message);
+      const oneLine = !text.includes("\n") && text.length <= 60;
+      const stamp = fullStamp(d);
 
       const col = el("div", { class: "msg-col" });
       if (groupStart && !mine && group) col.append(el("div", { class: "sender" }, m.sender_name));
-      col.append(el("div", { class: "bubble" }, m.message));
-      if (groupEnd) col.append(el("div", { class: "meta", title: fullStamp(d) }, fmtTime(d)));
+      col.append(el("div", { class: "bubble" + (oneLine ? " one-line" : "") }, text));
+      // The last bubble of a run always shows its time; the rest hang one beside
+      // the bubble that fades in on hover.
+      if (groupEnd) col.append(el("div", { class: "meta", title: stamp }, fmtTime(d)));
 
-      box.append(el("div", {
-        class: "msg" + (mine ? " mine" : " theirs") + (groupStart ? " group-start" : "") + (groupEnd ? " group-end" : ""),
-      }, col));
+      const row = el("div", {
+        class: "msg" + (mine ? " mine" : " theirs") + (groupStart ? " group-start" : "")
+          + (groupEnd ? " group-end" : "") + (state.animate.has(m.message_id) ? " enter" : ""),
+      });
+      const aside = groupEnd ? null : el("div", { class: "meta aside", title: stamp }, fmtTime(d));
+      if (mine && aside) row.append(aside);
+      row.append(col);
+      if (!mine && aside) row.append(aside);
+      box.append(row);
 
       prev = m;
       prevDate = d;
     });
+    state.animate.clear();
 
     if (mode === "prepend") {
       box.scrollTop = box.scrollHeight - prevHeight + prevTop;
@@ -380,6 +436,7 @@
     els.chatEmpty.hidden = hasChat;
     els.messages.hidden = !hasChat;
     els.composer.hidden = !hasChat;
+    if (!hasChat) renderHeader(null);      // no chat, no header bar
   }
 
   function updateComposer() {
@@ -518,7 +575,7 @@
     WS.on("message", (m) => {
       const chat = findChat(m.chat_id);
       if (!chat) { refreshChats(); return; }
-      storeIncoming(m.chat_id, [m]);
+      if (storeIncoming(m.chat_id, [m]) > 0) state.animate.add(m.message_id);
       bumpLastMessage(chat, m);
       const mine = isMine(m);
       if (!mine && m.chat_id !== state.activeChatId) chat.unread_message_count = (chat.unread_message_count || 0) + 1;
@@ -847,6 +904,14 @@
     els.messages.addEventListener("scroll", () => {
       if (els.messages.scrollTop < 80) loadOlder(state.activeChatId);
     });
+
+    // The composer floats over the messages, so the scroll box needs to reserve
+    // exactly its height -- which changes as the textarea grows.
+    if (window.ResizeObserver) {
+      new ResizeObserver(() => {
+        document.documentElement.style.setProperty("--composer-h", els.composer.offsetHeight + "px");
+      }).observe(els.composer);
+    }
 
     window.addEventListener("online", () => WS.connect());
     document.addEventListener("visibilitychange", () => {
