@@ -29,7 +29,7 @@ async def create_chat(chat: CHAT, session: Annotated[dict|None, Depends(verify_j
     if not status:
         raise HTTPException(status_code=400,detail="DB Insert went wrong")
     await manager.pubsub_instance.publish_message("control",json.dumps({"type":"create_channel","chat_id":str(chat_id),"user_ids":chat.chat_users}))
-    return {"Success":"Successfully Created Chat!"}
+    return {"chat_id":str(chat_id)}
 
 @chats.get("/chats",tags=["chats"])
 async def get_chats(session: Annotated[dict|None , Depends(verify_jwt)]):
