@@ -7,6 +7,7 @@
  *   { type: "message", ... }            -> "message"
  *   { type: "ack", content, timestamp } -> "ack"
  *   { type: "error", code, detail }     -> "error"
+ *   { type: "chat_created", chat_id }   -> "chat_created"
  *   { [chat_id]: [frames...] }          -> "pending"  (no top-level type)
  * Plus a synthetic "status" event: "connecting" | "open" | "closed".
  */
@@ -47,6 +48,7 @@ window.WS = (() => {
       case "message": emit("message", data); break;
       case "ack":     emit("ack", data); break;
       case "error":   emit("error", data); break;
+      case "chat_created": emit("chat_created", data); break;
       default:
         // Pending-messages map: keyed by chat_id, no top-level "type".
         if (data.type === undefined) emit("pending", data);

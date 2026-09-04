@@ -64,22 +64,50 @@ class WebsocketManager:
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if message is None:
                     continue
-                chat_id = message["channel"]
-                subscribers = self.chats.get(chat_id)
-                if not subscribers:
-                    continue                          # no local sockets for this chat -> ignore
-                logger.info("got message "+str(message))
-                content = message["data"]             # already a JSON string
-                message_id = json.loads(content)["message_id"]
-                for receiver_id,websocket in list(subscribers):
-                    try:
-                        await websocket.send_text(content)
-                    except Exception:
-                        continue                      # dead socket -> leave NOT-DELIVERED, replays on reconnect
-                    await connection.set_delivery_status([message_id],receiver_id)
+                try:
+                    await self._handle_pubsub_message(message)
+                except Exception:
+                    # never let one bad frame kill fan-out for the whole process
+                    logger.exception(f"pubsub_reader: failed to handle {message}")
         except asyncio.CancelledError:
             return                                    # clean shutdown: stop reading before the conn closes
 
+    async def _handle_pubsub_message(self,message:dict):
+        chat_id = message["channel"]
+        content = message["data"]                     # already a JSON string
+        if chat_id == "control":
+            await self._handle_control(json.loads(content))
+            return
+        subscribers = self.chats.get(chat_id)
+        if not subscribers:
+            return                                    # no local sockets for this chat -> ignore
+        logger.info("got message "+str(message))
+        message_id = json.loads(content)["message_id"]
+        for receiver_id,websocket in list(subscribers):
+            try:
+                await websocket.send_text(content)
+            except Exception:
+                continue                              # dead socket -> leave NOT-DELIVERED, replays on reconnect
+            await connection.set_delivery_status([message_id],receiver_id)
+
+    async def _handle_control(self,content:dict):
+        if content["type"] != "create_channel":
+            logger.warning(f"unknown control frame: {content}")
+            return
+        chat_id = content["chat_id"]
+        notify = json.dumps({"type":"chat_created","chat_id":chat_id})
+        for user_id in content["user_ids"]:
+            websocket = self.active_connections.get(user_id)
+            if websocket is None:
+                continue                              # not connected to this worker
+            members = self.chats.setdefault(chat_id,[])
+            entry = (user_id,websocket)
+            if entry not in members:                  # connect() may already have registered it
+                members.append(entry)
+            try:
+                await websocket.send_text(notify)     # tell the client to refetch /chats
+            except Exception:
+                continue
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)

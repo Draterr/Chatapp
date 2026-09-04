@@ -208,5 +208,15 @@ class Database:
             if not out:
                 raise HTTPException(status_code=404,detail="A user with this refresh token is not found")
         return out[0]
+    
+    async def search_username(self,*,input: str,searcher_id: int,limit: int) -> dict:
+        res = {"users":[]}
+        query = "SELECT user_id, display_name, username, avatar_url FROM users WHERE (display_name LIKE %s OR username LIKE %s) AND user_id != %s ORDER BY display_name LIMIT %s"
+        async with self._transaction() as cur:
+            await cur.execute(query,(input+"%",input+"%",searcher_id,limit))
+            out = await cur.fetchall()
+            for user_id,display_name,username,avatar_url in out:
+                res["users"].append({"user_id":user_id,"display_name":display_name,"username":username,"avatar_url":avatar_url})
+        return res
 
 connection = Database(user,password,database,host)

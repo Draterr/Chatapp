@@ -445,6 +445,11 @@
       if (m.chat_id === state.activeChatId) renderMessages(m.chat_id, mine ? "bottom" : "stick");
     });
 
+    WS.on("chat_created", (f) => {
+      // Server added us to a new chat; pull the sidebar entry if we don't have it yet.
+      if (!findChat(f.chat_id)) refreshChats();
+    });
+
     WS.on("pending", (map) => {
       // First map after boot replays exactly the rows GET /api/chats already counted as unread;
       // later maps (after a reconnect) are new.
@@ -505,8 +510,7 @@
     try {
       await API.createChat({ chat_name: name || "Direct message", chat_users: ids, is_dm: isDm });
       els.newChatDialog.close();
-      await refreshChats();
-      WS.reconnect();          // server registers chat channels only at connect time
+      await refreshChats();    // server registers the new chat on the live socket via a control frame
       if (state.chats.length) selectChat(state.chats[0].chat_id);
     } catch (e) {
       els.newChatError.textContent = e.message || "Couldn't create chat";
