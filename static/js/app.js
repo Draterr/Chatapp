@@ -85,11 +85,44 @@
     return !!(chat.last_message && chat.last_message.message_id);
   }
 
-  /* ---------- time (spec §6.1): backend sends naive UTC ---------- */
-  function parseUTC(s) {
+  /* ---------- time ----------
+   * Every timestamp the backend sends is RFC 3339 with an explicit offset and
+   * microsecond precision ("2026-09-03T12:28:31.590965+00:00"). Older rows, and
+   * anything that slips through without an offset, are naive UTC. parseTime() is
+   * the single entry point: it normalises the fractional seconds to the three
+   * digits `Date` is specified to accept, adds a colon to a compact "+0000"
+   * offset, and defaults a missing offset to UTC. Garbage yields an Invalid Date
+   * (every formatter below guards isNaN) rather than throwing.
+   */
+  const ISO_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?$/i;
+
+  function parseTime(v) {
+    if (v instanceof Date) return v;
+    if (typeof v !== "string") return new Date(NaN);
+    const s = v.trim();
     if (!s) return new Date(NaN);
-    if (s instanceof Date) return s;
-    return new Date(/(?:Z|[+-]\d\d:?\d\d)$/i.test(s) ? s : s + "Z");
+    const m = ISO_RE.exec(s);
+    if (!m) return new Date(s);                       // let the engine try; NaN if it can't
+    const [, date, clock, frac, rawZone] = m;
+    const ms = frac ? "." + (frac + "000").slice(0, 3) : "";
+    let zone = rawZone || "Z";                        // no offset -> naive UTC
+    if (/^[+-]\d{4}$/.test(zone)) zone = zone.slice(0, 3) + ":" + zone.slice(3);
+    return new Date(date + "T" + clock + ms + zone);
+  }
+
+  // Full local date + time + zone abbreviation, for `title` tooltips.
+  let stampFmt = null;
+  function fullStamp(d) {
+    if (isNaN(d)) return "";
+    if (!stampFmt) {
+      const opts = {
+        weekday: "short", year: "numeric", month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit", timeZoneName: "short",
+      };
+      try { stampFmt = new Intl.DateTimeFormat([], opts); }
+      catch (_) { stampFmt = { format: (x) => x.toLocaleString() }; }
+    }
+    return stampFmt.format(d);
   }
   function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
   function daysAgo(d) { return Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000); }
@@ -129,7 +162,7 @@
 
   /* ---------- message store ---------- */
   function sortChats() {
-    const key = (c) => (hasLastMessage(c) ? parseUTC(c.last_message.time_sent).getTime() : 0);
+    const key = (c) => (hasLastMessage(c) ? parseTime(c.last_message.time_sent).getTime() : 0);
     state.chats.sort((a, b) => key(b) - key(a));
   }
 
@@ -145,7 +178,7 @@
       list.push(f);
       added++;
     }
-    if (added) list.sort((a, b) => parseUTC(a.time_sent) - parseUTC(b.time_sent));
+    if (added) list.sort((a, b) => parseTime(a.time_sent) - parseTime(b.time_sent));
     return added;
   }
 
@@ -160,7 +193,7 @@
   }
 
   function bumpLastMessage(chat, m) {
-    if (hasLastMessage(chat) && parseUTC(chat.last_message.time_sent) > parseUTC(m.time_sent)) return;
+    if (hasLastMessage(chat) && parseTime(chat.last_message.time_sent) > parseTime(m.time_sent)) return;
     chat.last_message = {
       message_id: m.message_id, sender_id: m.sender_id, message: m.message, time_sent: m.time_sent,
     };
@@ -187,12 +220,15 @@
       const title = chatTitle(chat);
       let preview = "No messages yet";
       let time = "";
+      let timeTitle = "";
       if (hasLastMessage(chat)) {
         const lm = chat.last_message;
         const who = lm.sender_id === state.me.user_id ? "You: "
           : isGroup(chat) ? memberName(chat, lm.sender_id).split(/\s+/)[0] + ": " : "";
         preview = who + lm.message;
-        time = fmtCoarse(parseUTC(lm.time_sent));
+        const d = parseTime(lm.time_sent);
+        time = fmtCoarse(d);
+        timeTitle = fullStamp(d);
       }
       const unread = chat.unread_message_count > 0;
       list.append(el("button", {
@@ -205,7 +241,7 @@
           el("span", { class: "conv-name" }, title),
           el("span", { class: "conv-preview" }, preview)),
         el("span", { class: "conv-side" },
-          el("span", { class: "conv-time" }, time),
+          el("span", { class: "conv-time", title: timeTitle || null }, time),
           unread ? el("span", { class: "badge" }, String(chat.unread_message_count)) : null),
       ));
     }
@@ -259,9 +295,9 @@
     let prev = null;
     let prevDate = null;
     msgs.forEach((m, i) => {
-      const d = parseUTC(m.time_sent);
+      const d = parseTime(m.time_sent);
       const next = msgs[i + 1];
-      const nextDate = next ? parseUTC(next.time_sent) : null;
+      const nextDate = next ? parseTime(next.time_sent) : null;
       const newDay = !prev || !sameDay(prevDate, d);
       if (newDay) box.append(el("div", { class: "day" }, fmtDay(d)));
 
@@ -271,8 +307,8 @@
 
       const col = el("div", { class: "msg-col" });
       if (groupStart && !mine && group) col.append(el("div", { class: "sender" }, m.sender_name));
-      col.append(el("div", { class: "bubble", title: d.toLocaleString() }, m.message));
-      if (groupEnd) col.append(el("div", { class: "meta" }, fmtTime(d)));
+      col.append(el("div", { class: "bubble" }, m.message));
+      if (groupEnd) col.append(el("div", { class: "meta", title: fullStamp(d) }, fmtTime(d)));
 
       box.append(el("div", {
         class: "msg" + (mine ? " mine" : " theirs") + (groupStart ? " group-start" : "") + (groupEnd ? " group-end" : ""),
