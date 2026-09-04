@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from passlib.hash import bcrypt
 import uuid
-from datetime import datetime
+from datetime import datetime,timezone
 
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
@@ -18,6 +18,14 @@ if APP_ENV != "DOCKER":
 else:
     host = "mysql_db"
     port = 3306
+
+def iso_utc(dt):
+    """DATETIME columns hold naive UTC; stamp the offset so clients can localize."""
+    if dt is None or isinstance(dt,str):
+        return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 class Database:
     def __init__(self,user: str|None,password:str|None,database:str|None,host:str|None):
@@ -35,7 +43,8 @@ class Database:
                                                db=self.database,
                                                minsize=min_pool_size,
                                                maxsize=max_pool_size,
-                                               autocommit=False
+                                               autocommit=False,
+                                               init_command="SET time_zone = '+00:00'"
                                                )
         except Exception as e:
             logger.exception("pool initialization failed")
@@ -164,8 +173,8 @@ class Database:
             for chat_id,unread_count in unread_count:
                 res[chat_id]["unread_message_count"] = unread_count
             for chat_id,message_id,sent_by,content,time_sent in last_message:
-                res[chat_id]["last_message"] = {"message_id":message_id,"sender_id":sent_by,"message":content,"time_sent":time_sent}
-            return {"data":sorted(res.values(),key=lambda x:x["last_message"].get("time_sent") or datetime.min,reverse=True)}
+                res[chat_id]["last_message"] = {"message_id":message_id,"sender_id":sent_by,"message":content,"time_sent":iso_utc(time_sent)}
+            return {"data":sorted(res.values(),key=lambda x:x["last_message"].get("time_sent") or "",reverse=True)}
     
     async def get_chat_message(self,chat_id: str, user_id:int, limit:int,offset:int) -> dict :
         query = ("SELECT m.message_id, m.sent_by, u.display_name, m.time_sent, m.chat_id, m.content "
@@ -178,7 +187,7 @@ class Database:
             await cur.execute(query,(user_id,chat_id,limit,offset))
             out = await cur.fetchall()
         messages = [{"type":"message","message_id":message_id,"sender_id":sender_id,
-                     "sender_name":sender_name,"message":content,"time_sent":time_sent,"chat_id":cid}
+                     "sender_name":sender_name,"message":content,"time_sent":iso_utc(time_sent),"chat_id":cid}
                     for message_id,sender_id,sender_name,time_sent,cid,content in out]
         has_more = len(messages) == limit          # a full page -> assume more exist
         messages.reverse()                         # DESC from SQL -> oldest->newest for display
@@ -192,7 +201,7 @@ class Database:
     async def revoke_refresh_token(self,user_id: int) -> None:
         query = "UPDATE refresh_tokens SET revoked = True ,expires_at = %s WHERE user_id = %s"
         async with self._transaction() as cur:
-            await cur.execute(query,(datetime.now().isoformat(),user_id))
+            await cur.execute(query,(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"),user_id))
 
     async def refresh_refresh_token(self,*,user_id: int,old_token_hash: str, new_refresh_token: str,expires_at: str,created_at: str) -> None:
         update_query = "UPDATE refresh_tokens SET revoked = True, expires_at = NOW() where user_id = %s and token_hash = %s"
@@ -218,5 +227,7 @@ class Database:
             for user_id,display_name,username,avatar_url in out:
                 res["users"].append({"user_id":user_id,"display_name":display_name,"username":username,"avatar_url":avatar_url})
         return res
+    # async def delete_chat(self,*,chat_id: str) -> None:
+    #     delete_chat_query = ""
 
 connection = Database(user,password,database,host)

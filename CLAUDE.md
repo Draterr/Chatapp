@@ -59,36 +59,59 @@ clients must hit the backend port directly.
 
 ### Auth
 
-`app/routers/users.py` issues a HS256 JWT (`{user, role, user_id}`, 3-day expiry) in an httpOnly
-`session` cookie. `verify_jwt` is a `Cookie()`-based dependency and returns `None` (not a 401) on
-failure — callers must check. The WebSocket endpoint takes it as a `Depends` and derives
+`app/routers/users.py` issues a HS256 JWT (`{user, role, user_id}`) in an httpOnly `session` cookie,
+good for `ACCESS_TOKEN_EXPIRE_MINUTES` (600, i.e. 10h), plus an opaque refresh token in a second
+httpOnly cookie scoped to `path=/api/refresh` and good for 7 days. Only the sha256 of the refresh
+token is stored (`refresh_tokens`); the raw value never reaches the DB. `POST /refresh` rotates the
+pair and revokes the old hash. `verify_jwt` is a `Cookie()`-based dependency and returns `None` (not
+a 401) on failure — callers must check. The WebSocket endpoint takes it as a `Depends` and derives
 `client_id` from the session.
+
+`GET /users?q=<prefix>&limit=` (`search_username`) prefix-matches `display_name`/`username`,
+excludes the caller, and clamps `limit` to 25. `%`, `_` and `\` in `q` are escaped before the `LIKE`.
 
 ### Messaging pipeline (`app/routers/websocket.py`)
 
 1. On connect: session → `client_id`, `get_chats()` lists the user's `chat_id`s, `WebsocketManager`
-   registers the socket under each chat and subscribes the shared Redis pubsub to those channels.
-2. Undelivered rows (`message_status.status = 'NOT-DELIVERED'`) are replayed as a `SuccessResponse`
-   grouped by chat and sorted by `time_sent` (`app/dependencies.py`), then marked `DELIVERED`.
+   registers the socket under each chat in `manager.chats`. It does **not** touch pubsub — the
+   reader `psubscribe("*")`s once in the router's `startup` hook and owns that connection alone;
+   subscribing from a request task races the reader's read ("readuntil() already waiting").
+2. Undelivered rows (`message_status.status = 'NOT-DELIVERED'`) are replayed as a bare
+   `{chat_id: [MessageFrame, ...]}` map (no top-level `type`), grouped by chat and sorted by
+   `time_sent` (`app/dependencies.py`), then marked `DELIVERED`.
 3. Inbound frame `{client_id, chat_id, message}` → `insert_message()` writes the row plus one
    `message_status` row per other chat member → sender gets an `ack` → the text is `PUBLISH`ed to
    the Redis channel named after `chat_id`.
 4. A single background task (`pubsub_reader`, started in the router's `startup` hook) consumes all
-   channels and pushes to every socket in `manager.chats[chat_id]`.
+   channels and dispatches each frame through `_handle_pubsub_message()`, which pushes to every
+   socket in `manager.chats[chat_id]`. Each frame is handled inside its own `try` — one malformed
+   payload is logged and skipped instead of killing fan-out for the whole worker.
 
 Redis is what makes this work across multiple backend workers/instances — a message is never sent
 straight to peer sockets, it always round-trips through pub/sub.
 
+**The `control` channel.** `chat_id` channels carry messages; the reserved `control` channel carries
+membership changes, handled by `_handle_control()`. `POST /create_chat` publishes
+`{type:"create_channel", chat_id, user_ids}` after the DB insert; each worker then registers the new
+chat for whichever of those users it holds a live socket for and pushes them a
+`{type:"chat_created", chat_id}` frame so the client refetches `/chats`. Without this a new chat
+stayed invisible until the socket reconnected. Appends are deduped against the existing entry,
+because `connect()` may already have registered that same socket.
+
 Note: the send path trusts the client-supplied `client_id` in the frame instead of the session's;
 this is a known gap, tracked as item #5 in the `chat.js` integration comments.
+
+Note: `POST /chat/delete_chat` (`app/routers/chats.py`) is an unfinished stub — its membership check
+compares a `str` against the one-tuples `get_chats()` returns, so it always raises a bare
+`PermissionError` and 500s, and `connection.delete_chat()` holds no query. Nothing calls it yet.
 
 ### Database (`app/db.py`)
 
 One `Database` singleton (`connection`) wrapping an `aiomysql` pool created in `main.py`'s startup
-hook. The pool is `autocommit=True` — that is why the `conn.commit()` calls are commented out;
-don't reintroduce them. Every method follows the `get_connection()` / `try` / `finally
-free_connection()` shape and uses `%s` placeholders. All SQL lives here; routers never talk to the
-driver directly.
+hook. The pool is `autocommit=False` and every method goes through the `_transaction()` async
+context manager, which yields a cursor, commits on clean exit and rolls back on any exception — so a
+multi-statement write is atomic. Use `%s` placeholders. All SQL lives here; routers never talk to
+the driver directly.
 
 Schema (`database/schema.sql`): `users`, `chats`, `chat_users` (join), `messages`,
 `message_status` (per-recipient delivery state, the basis of offline delivery).
@@ -110,12 +133,17 @@ Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-map
   triggers one single-flight `POST /api/refresh` and a retry, else redirects to `/login/`.
 - `js/ws.js` — `WS.connect()` to `ws://<host>:8000/ws` (direct, not via nginx), backoff
   reconnect (runs `API.getMe()` first so an expired session is refreshed before the handshake),
-  routes the four inbound frame shapes (`message`/`ack`/`error`/type-less pending map).
+  routes the five inbound frame shapes
+  (`message`/`ack`/`error`/`chat_created`/type-less pending map).
 - `js/app.js` — `state`, rendering, events, boot. Own messages render only on the echoed
   `message` frame (never optimistically). Unread counts are client-side after boot; "older"
-  pages use `offset = loaded count`. Scripts load in order: api → ws → app.
+  pages use `offset = loaded count`. A `chat_created` frame triggers `refreshChats()` when the chat
+  is unknown, which is why creating a chat no longer forces a `WS.reconnect()`. Scripts load in
+  order: api → ws → app.
 - `login/` — sign-in / create-account card; branches on HTTP status, not message strings.
-- "New chat" is a dev affordance taking raw user ids — there is no user-search endpoint yet.
+- "New chat" is still a dev affordance taking raw user ids. `GET /api/users?q=` (see Auth) now
+  exists on the backend but is not wired into the dialog yet, and `index.html` still carries the
+  "no user directory" copy and TODO.
 - `client1.html` / `client2.html` remain as bare WS harnesses.
 
 ## Entrypoint scripts

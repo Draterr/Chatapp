@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 import json
 from typing import List,Literal
 from pydantic import BaseModel
-from db import connection
+from db import connection,iso_utc
 from dependencies import sort_by_time
 from routers.users import verify_jwt
 from pubsub import *
@@ -164,7 +164,7 @@ async def stop_pubsub_reader():
 
 
 async def user_send_message(sender_name:str,sender_id:int,chat_id:str,message:str):
-    time = datetime.now(timezone.utc).replace(tzinfo=None)   # naive UTC
+    time = datetime.now(timezone.utc)
     time_sent = time.strftime("%Y-%m-%d %H:%M:%S.%f")           # MySQL-friendly for storage
     try:
         message_id = await connection.insert_message(sender_id,time_sent,chat_id,message)
@@ -202,7 +202,7 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
         sender = message[3]
         message_id = message[4]
         sender_name = message[5]
-        tmp = MessageFrame(type="message",message_id=message_id,sender_id=sender,message=content,time_sent=time_sent.isoformat(),chat_id=chat_id,sender_name=sender_name)
+        tmp = MessageFrame(type="message",message_id=message_id,sender_id=sender,message=content,time_sent=iso_utc(time_sent),chat_id=chat_id,sender_name=sender_name)
         objs[chat_id].append(tmp)
         message_ids.append(message_id)
     #Sort the messages by the time sent

@@ -47,11 +47,12 @@ async def get_chat_message(session: Annotated[dict|None , Depends(verify_jwt)],c
     chat_messages = await connection.get_chat_message(chat_id,user_id,limit,offset)
     return chat_messages
 
-@chats.post("/chat/delete_chat",tags=["chats"])
-async def delete_chat(session: Annotated[dict|None , Depends(verify_jwt)],chat_id:str):
-    if session is None:
-        raise HTTPException(status_code=403,detail="Unauthorized")
-    uid = session["user_id"]
-    existing_chat = await connection.get_chats(uid)
-    if chat_id not in existing_chat:
-        raise PermissionError("You are not a member of this chat!")
+# @chats.post("/chat/delete_chat",tags=["chats"])
+# async def delete_chat(session: Annotated[dict|None , Depends(verify_jwt)],chat_id:str):
+#     if session is None:
+#         raise HTTPException(status_code=403,detail="Unauthorized")
+#     uid = session["user_id"]
+#     existing_chat = await connection.get_chats(uid)
+#     if chat_id not in existing_chat:
+#         raise HTTPException(status_code=403,detail="You are not a member of this chat!")
+#
