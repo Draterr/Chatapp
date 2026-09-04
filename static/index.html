@@ -18,7 +18,7 @@
           <span class="me-name" id="meName"></span>
         </div>
         <div class="sidebar-actions">
-          <button class="icon-btn" id="newChatBtn" type="button" title="New chat (dev: needs user ids)" aria-label="New chat">
+          <button class="icon-btn" id="newChatBtn" type="button" title="New conversation" aria-label="New conversation">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </button>
           <button class="icon-btn" id="logoutBtn" type="button" title="Log out" aria-label="Log out">
@@ -64,28 +64,30 @@
 
   <div class="toast" id="toast" role="alert" hidden></div>
 
-  <!-- New chat: dev affordance. There is no user-search endpoint yet, so members
-       are entered as raw user ids. Backend TODO: GET /users?q= to pick by name. -->
-  <dialog class="dialog" id="newChatDialog" aria-labelledby="newChatTitle">
+  <!-- New chat: people picker backed by GET /api/users?q= -->
+  <dialog class="dialog picker" id="newChatDialog" aria-labelledby="newChatTitle">
     <form id="newChatForm" method="dialog">
-      <h2 id="newChatTitle">New chat</h2>
-      <p class="muted small">Until the backend has a user directory, add members by their user id.</p>
-      <label>
-        <span>Name</span>
-        <input type="text" name="chat_name" maxlength="255" placeholder="Group name (ignored for DMs)" />
+      <h2 id="newChatTitle">New conversation</h2>
+
+      <div class="picker-field" id="pickerField">
+        <div class="chips" id="pickerChips"></div>
+        <input type="text" id="pickerInput" placeholder="Search people" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-controls="pickerResults"
+               aria-autocomplete="list" aria-label="Search people" />
+      </div>
+
+      <ul class="picker-results" id="pickerResults" role="listbox" aria-label="People"></ul>
+      <p class="picker-status" id="pickerStatus" role="status"></p>
+
+      <label class="group-name" id="groupNameRow" hidden>
+        <span>Group name</span>
+        <input type="text" id="groupNameInput" maxlength="255" placeholder="What's this about?" />
       </label>
-      <label>
-        <span>Member user ids</span>
-        <input type="text" name="chat_users" inputmode="numeric" placeholder="e.g. 5, 8" required />
-      </label>
-      <label class="check">
-        <input type="checkbox" name="is_dm" />
-        <span>Direct message (exactly one other member)</span>
-      </label>
+
       <div class="form-error" id="newChatError" role="alert"></div>
       <div class="dialog-actions">
         <button type="button" class="btn ghost" data-close>Cancel</button>
-        <button type="submit" class="btn primary">Create</button>
+        <button type="submit" class="btn primary" id="newChatSubmit" disabled>Message</button>
       </div>
     </form>
   </dialog>

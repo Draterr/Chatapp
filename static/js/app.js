@@ -19,6 +19,17 @@
     wsStatus: "closed",
     everOpened: false,      // has the socket opened at least once
     pendingCounted: false,  // first pending map is already reflected in unread counts
+    awaitingNewChat: null,  // Set of chat_ids from just before POST /create_chat
+  };
+
+  // People picker (the "New conversation" dialog).
+  const picker = {
+    selected: [],   // [{ user_id, display_name, username, avatar_url }]
+    results: [],    // last search response, minus nothing -- already-chosen rows stay, marked
+    active: -1,     // keyboard cursor into results
+    timer: null,    // debounce
+    abort: null,    // AbortController for the in-flight search
+    busy: false,    // create request in flight
   };
 
   const $ = (id) => document.getElementById(id);
@@ -30,6 +41,10 @@
     composer: $("composer"), composerInput: $("composerInput"), sendBtn: $("sendBtn"),
     sendingHint: $("sendingHint"), toast: $("toast"),
     newChatDialog: $("newChatDialog"), newChatForm: $("newChatForm"), newChatError: $("newChatError"),
+    pickerField: $("pickerField"), pickerInput: $("pickerInput"),
+    pickerChips: $("pickerChips"), pickerResults: $("pickerResults"),
+    pickerStatus: $("pickerStatus"), groupNameRow: $("groupNameRow"), groupNameInput: $("groupNameInput"),
+    newChatSubmit: $("newChatSubmit"),
   };
 
   /* ---------- tiny DOM helper (never innerHTML with user content) ---------- */
@@ -65,6 +80,22 @@
     return s.toUpperCase();
   }
 
+  // One avatar everywhere: a hued circle with initials, overlaid by the image when
+  // `avatar_url` is set. A broken image removes itself, uncovering the initials.
+  function avatarEl(name, seed, url, extraClass) {
+    const node = el("span", {
+      class: "avatar" + (extraClass ? " " + extraClass : ""),
+      style: `--avatar-hue:${hueFor(seed)}`,
+      "aria-hidden": "true",
+    }, initials(name));
+    if (url) {
+      const img = el("img", { src: url, alt: "" });
+      img.addEventListener("error", () => img.remove());
+      node.append(img);
+    }
+    return node;
+  }
+
   function isMine(msg) { return state.me && msg.sender_id === state.me.user_id; }
   function isGroup(chat) { return (chat.members || []).length > 2; }
   function findChat(chatId) { return state.chats.find((c) => c.chat_id === chatId); }
@@ -74,6 +105,18 @@
     const others = members.filter((m) => m.user_id !== state.me.user_id);
     if (members.length === 2 && others.length === 1) return others[0].display_name || chat.chat_name;
     return chat.chat_name || others.map((m) => m.display_name).join(", ") || "Chat";
+  }
+
+  // DMs are hued by the other person so they look the same here, in the header and
+  // in the picker; groups are hued by chat_id (spec §6).
+  function otherMember(chat) {
+    const members = chat.members || [];
+    if (members.length !== 2) return null;
+    return members.find((m) => m.user_id !== state.me.user_id) || null;
+  }
+  function chatAvatarSeed(chat) {
+    const other = otherMember(chat);
+    return other ? "user:" + other.user_id : chat.chat_id;
   }
 
   function memberName(chat, userId) {
@@ -203,8 +246,10 @@
   function renderMe() {
     const name = state.me.display_name || state.me.user;
     els.meName.textContent = name;
-    els.meAvatar.textContent = initials(name);
-    els.meAvatar.style.background = hueFor("user:" + state.me.user_id);
+    els.meAvatar.replaceWith(
+      Object.assign(avatarEl(name, "user:" + state.me.user_id, state.me.avatar_url, "avatar-sm"),
+        { id: "meAvatar" }));
+    els.meAvatar = $("meAvatar");
   }
 
   function renderChatList() {
@@ -236,7 +281,7 @@
         class: "conv" + (chat.chat_id === state.activeChatId ? " active" : "") + (unread ? " unread" : ""),
         "data-chat": chat.chat_id,
       },
-        el("span", { class: "avatar", style: `background:${hueFor(chat.chat_id)}`, "aria-hidden": "true" }, initials(title)),
+        avatarEl(title, chatAvatarSeed(chat), (otherMember(chat) || {}).avatar_url),
         el("span", { class: "conv-main" },
           el("span", { class: "conv-name" }, title),
           el("span", { class: "conv-preview" }, preview)),
@@ -256,9 +301,10 @@
     }
     const title = chatTitle(chat);
     els.chatTitle.textContent = title;
-    els.chatAvatar.hidden = false;
-    els.chatAvatar.textContent = initials(title);
-    els.chatAvatar.style.background = hueFor(chat.chat_id);
+    const next = avatarEl(title, chatAvatarSeed(chat), (otherMember(chat) || {}).avatar_url, "avatar-sm");
+    next.id = "chatAvatar";
+    els.chatAvatar.replaceWith(next);
+    els.chatAvatar = next;
   }
 
   function scrollToBottom() {
@@ -482,7 +528,9 @@
     });
 
     WS.on("chat_created", (f) => {
-      // Server added us to a new chat; pull the sidebar entry if we don't have it yet.
+      // The chat we just asked for? Refresh and open it (adoptNewChat is idempotent).
+      if (state.awaitingNewChat && !state.awaitingNewChat.has(f.chat_id)) { adoptNewChat(); return; }
+      // Otherwise someone else added us: pull the sidebar entry if we don't have it.
       if (!findChat(f.chat_id)) refreshChats();
     });
 
@@ -520,38 +568,227 @@
     });
   }
 
-  /* ---------- new chat (dev affordance — no user directory endpoint yet) ---------- */
+  /* ---------- new conversation: people picker ----------
+   * GET /api/users?q= is a prefix search; the caller is excluded server-side.
+   * One person selected is a DM, two or more is a named group.
+   */
+  const SEARCH_DEBOUNCE = 150;
+  const SEARCH_LIMIT = 10;
+
+  function cancelSearch() {
+    clearTimeout(picker.timer);
+    picker.timer = null;
+    if (picker.abort) { picker.abort.abort(); picker.abort = null; }
+  }
+
   function openNewChat() {
+    cancelSearch();
+    picker.selected = [];
+    picker.results = [];
+    picker.active = -1;
+    picker.busy = false;
+    els.pickerInput.value = "";
+    els.groupNameInput.value = "";
     els.newChatError.textContent = "";
-    els.newChatForm.reset();
+    els.pickerStatus.textContent = "";
+    renderPicker();
     els.newChatDialog.showModal();
+    els.pickerInput.focus();
+  }
+
+  function closePicker() {
+    cancelSearch();
+    if (els.newChatDialog.open) els.newChatDialog.close();
+  }
+
+  function renderPicker() {
+    renderChips();
+    renderResults();
+    renderPickerMode();
+  }
+
+  function renderPickerMode() {
+    const n = picker.selected.length;
+    els.groupNameRow.hidden = n < 2;                       // a DM's title comes from its members
+    els.newChatSubmit.textContent = n >= 2 ? "Create group" : "Message";
+    els.newChatSubmit.disabled = n === 0 || picker.busy;
+    els.newChatDialog.classList.toggle("has-chips", n > 0);
+  }
+
+  function renderChips() {
+    els.pickerChips.replaceChildren();
+    for (const u of picker.selected) {
+      const name = u.display_name || u.username;
+      els.pickerChips.append(el("span", { class: "chip" },
+        avatarEl(name, "user:" + u.user_id, u.avatar_url, "avatar-xs"),
+        el("span", { class: "chip-name" }, name),
+        el("button", {
+          type: "button", class: "chip-x", "aria-label": "Remove " + name,
+          onclick: () => pickerRemove(u.user_id),
+        }, "\u00d7")));
+    }
+  }
+
+  function renderResults() {
+    const list = els.pickerResults;
+    list.replaceChildren();
+    const chosen = new Set(picker.selected.map((u) => u.user_id));
+    picker.results.forEach((u, i) => {
+      const name = u.display_name || u.username;
+      const already = chosen.has(u.user_id);
+      list.append(el("li", {
+        class: "picker-row" + (i === picker.active ? " active" : "") + (already ? " chosen" : ""),
+        role: "option",
+        "aria-selected": i === picker.active ? "true" : "false",
+        id: "picker-opt-" + i,
+        "data-user": String(u.user_id),
+      },
+        avatarEl(name, "user:" + u.user_id, u.avatar_url, "avatar-sm"),
+        el("span", { class: "picker-row-main" },
+          el("span", { class: "picker-row-name" }, name),
+          el("span", { class: "picker-row-handle" }, "@" + u.username)),
+        already ? el("span", { class: "picker-row-tag" }, "Added") : null));
+    });
+    els.pickerInput.setAttribute("aria-expanded", picker.results.length ? "true" : "false");
+    if (picker.active >= 0) els.pickerInput.setAttribute("aria-activedescendant", "picker-opt-" + picker.active);
+    else els.pickerInput.removeAttribute("aria-activedescendant");
+    const active = list.querySelector(".picker-row.active");
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
+  function onPickerInput() {
+    cancelSearch();
+    const q = els.pickerInput.value.trim();
+    if (!q) {                                   // an empty q would still hit the DB
+      picker.results = [];
+      picker.active = -1;
+      els.pickerStatus.textContent = "";
+      renderResults();
+      return;
+    }
+    picker.timer = setTimeout(() => runSearch(q), SEARCH_DEBOUNCE);
+  }
+
+  async function runSearch(q) {
+    const ctrl = new AbortController();
+    picker.abort = ctrl;
+    picker.timer = null;
+    els.newChatError.textContent = "";
+    try {
+      const res = await API.searchUsers(q, { limit: SEARCH_LIMIT, signal: ctrl.signal });
+      // Drop the answer if a newer keystroke superseded it, or the field moved on.
+      if (picker.abort !== ctrl || els.pickerInput.value.trim() !== q) return;
+      picker.abort = null;
+      picker.results = Array.isArray(res.users) ? res.users : [];
+      picker.active = picker.results.length ? 0 : -1;
+      els.pickerStatus.textContent = picker.results.length ? "" : `No one matches “${q}”`;
+      renderResults();
+    } catch (e) {
+      if (ctrl.signal.aborted || (e && e.name === "AbortError")) return;
+      if (picker.abort === ctrl) picker.abort = null;
+      if (e && e.redirected) return;
+      picker.results = [];
+      picker.active = -1;
+      els.pickerStatus.textContent = "";
+      renderResults();
+      els.newChatError.textContent = "Couldn't search for people — check your connection.";
+    }
+  }
+
+  function movePicker(delta) {
+    if (!picker.results.length) return;
+    const n = picker.results.length;
+    picker.active = picker.active < 0
+      ? (delta > 0 ? 0 : n - 1)
+      : (picker.active + delta + n) % n;
+    renderResults();
+  }
+
+  function pickerAdd(u) {
+    if (!u || picker.selected.some((s) => s.user_id === u.user_id)) return;   // no-op
+    picker.selected.push(u);
+    cancelSearch();
+    picker.results = [];
+    picker.active = -1;
+    els.pickerInput.value = "";
+    els.pickerStatus.textContent = "";
+    els.newChatError.textContent = "";
+    renderPicker();
+    els.pickerInput.focus();
+  }
+
+  function pickerRemove(userId) {
+    picker.selected = picker.selected.filter((u) => u.user_id !== userId);
+    renderPicker();
+    els.pickerInput.focus();
+  }
+
+  /* POST /create_chat returns { "Success": ... } and no chat_id, so the new chat is
+   * whichever id shows up that wasn't there before the call. Two things can reveal
+   * it -- our own refresh, and the server's chat_created control frame -- so both
+   * funnel through here and the first one to find it wins. */
+  let adopting = null;
+  function adoptNewChat() {
+    if (!state.awaitingNewChat) return Promise.resolve(false);
+    if (adopting) return adopting;
+    const before = state.awaitingNewChat;
+    adopting = (async () => {
+      await refreshChats();
+      if (state.awaitingNewChat !== before) return false;
+      const fresh = state.chats.find((c) => !before.has(c.chat_id));
+      if (!fresh) return false;
+      state.awaitingNewChat = null;
+      await selectChat(fresh.chat_id);
+      els.composerInput.focus();
+      return true;
+    })().finally(() => { adopting = null; });
+    return adopting;
   }
 
   async function submitNewChat(ev) {
     ev.preventDefault();
-    const fd = new FormData(els.newChatForm);
-    const name = String(fd.get("chat_name") || "").trim();
-    const ids = String(fd.get("chat_users") || "")
-      .split(/[\s,]+/).filter(Boolean).map(Number);
-    const isDm = fd.get("is_dm") === "on";
-    if (ids.some((n) => !Number.isInteger(n) || n <= 0)) {
-      els.newChatError.textContent = "User ids must be positive whole numbers.";
+    if (picker.busy || !picker.selected.length) return;
+    els.newChatError.textContent = "";
+    const chosen = picker.selected.slice();
+    const isDm = chosen.length === 1;
+
+    // The backend has no DM-uniqueness check, so a second DM with the same person
+    // would silently create a second chat. Open the one we already have instead.
+    if (isDm) {
+      const existing = state.chats.find(
+        (c) => (c.members || []).length === 2 && c.members.some((m) => m.user_id === chosen[0].user_id));
+      if (existing) {
+        closePicker();
+        await selectChat(existing.chat_id);
+        els.composerInput.focus();
+        return;
+      }
+    }
+
+    // chat_name is required by the API; a DM's UI title comes from its members anyway.
+    const name = isDm ? (chosen[0].display_name || chosen[0].username) : els.groupNameInput.value.trim();
+    if (!isDm && !name) {
+      els.newChatError.textContent = "Give the group a name.";
+      els.groupNameInput.focus();
       return;
     }
-    if (!ids.length) { els.newChatError.textContent = "Add at least one user id."; return; }
-    if (isDm && ids.length !== 1) { els.newChatError.textContent = "A direct message has exactly one other member."; return; }
-    if (!isDm && !name) { els.newChatError.textContent = "Group chats need a name."; return; }
-    const btn = els.newChatForm.querySelector("button[type=submit]");
-    btn.disabled = true;
+
+    picker.busy = true;
+    renderPickerMode();
+    state.awaitingNewChat = new Set(state.chats.map((c) => c.chat_id));
+    const claimed = state.awaitingNewChat;
+    // Don't let a stale flag hijack an unrelated chat_created frame later on.
+    setTimeout(() => { if (state.awaitingNewChat === claimed) state.awaitingNewChat = null; }, 15000);
     try {
-      await API.createChat({ chat_name: name || "Direct message", chat_users: ids, is_dm: isDm });
-      els.newChatDialog.close();
-      await refreshChats();    // server registers the new chat on the live socket via a control frame
-      if (state.chats.length) selectChat(state.chats[0].chat_id);
+      await API.createChat({ chat_name: name, chat_users: chosen.map((u) => u.user_id), is_dm: isDm });
+      closePicker();
+      await adoptNewChat();
     } catch (e) {
-      els.newChatError.textContent = e.message || "Couldn't create chat";
+      if (state.awaitingNewChat === claimed) state.awaitingNewChat = null;
+      if (!(e && e.redirected)) els.newChatError.textContent = e.message || "Couldn't start the conversation.";
     } finally {
-      btn.disabled = false;
+      picker.busy = false;
+      renderPickerMode();
     }
   }
 
@@ -565,7 +802,38 @@
     els.logoutBtn.addEventListener("click", logout);
     els.newChatBtn.addEventListener("click", openNewChat);
     els.newChatForm.addEventListener("submit", submitNewChat);
-    els.newChatDialog.querySelector("[data-close]").addEventListener("click", () => els.newChatDialog.close());
+    for (const b of els.newChatDialog.querySelectorAll("[data-close]")) {
+      b.addEventListener("click", closePicker);
+    }
+    // Esc closes the dialog natively; make sure the in-flight search dies with it.
+    els.newChatDialog.addEventListener("close", cancelSearch);
+
+    els.pickerInput.addEventListener("input", onPickerInput);
+    els.pickerInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "ArrowDown") { ev.preventDefault(); movePicker(1); }
+      else if (ev.key === "ArrowUp") { ev.preventDefault(); movePicker(-1); }
+      else if (ev.key === "Enter" && !ev.isComposing) {
+        // Never let Enter reach the form -- in the picker it means "pick this one".
+        ev.preventDefault();
+        pickerAdd(picker.results[picker.active]);
+      } else if (ev.key === "Backspace" && !els.pickerInput.value && picker.selected.length) {
+        ev.preventDefault();
+        pickerRemove(picker.selected[picker.selected.length - 1].user_id);
+      }
+    });
+    els.pickerResults.addEventListener("click", (ev) => {
+      const row = ev.target.closest("[data-user]");
+      if (row) pickerAdd(picker.results.find((u) => String(u.user_id) === row.dataset.user));
+    });
+    els.pickerResults.addEventListener("mousemove", (ev) => {
+      const row = ev.target.closest("[data-user]");
+      if (!row) return;
+      const i = picker.results.findIndex((u) => String(u.user_id) === row.dataset.user);
+      if (i >= 0 && i !== picker.active) { picker.active = i; renderResults(); }
+    });
+    els.pickerField.addEventListener("click", (ev) => {
+      if (!ev.target.closest(".chip-x")) els.pickerInput.focus();
+    });
 
     els.composerInput.addEventListener("input", () => { autoGrow(); updateComposer(); });
     els.composerInput.addEventListener("keydown", (ev) => {

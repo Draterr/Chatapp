@@ -66,6 +66,12 @@ window.API = (() => {
 
     getChats: () => apiFetch("/chats").then(toJson),
 
+    // Prefix match on display_name or username; the caller is excluded server-side
+    // and `limit` is clamped to 1-25. `q` must be non-empty after trimming --
+    // an empty query still hits the DB, so callers guard before calling.
+    searchUsers: (q, { limit = 10, signal } = {}) =>
+      apiFetch(`/users?q=${encodeURIComponent(q)}&limit=${limit}`, { signal }).then(toJson),
+
     getMessages: (chatId, { limit = 50, offset = 0 } = {}) =>
       apiFetch(`/chat/${encodeURIComponent(chatId)}/messages?limit=${limit}&offset=${offset}`).then(toJson),
 
