@@ -47,6 +47,20 @@
           <h1 class="chat-title" id="chatTitle"></h1>
           <span class="chat-sub" id="chatSub"></span>
         </span>
+
+        <!-- Conversation menu. Items are shown/hidden per chat by renderChatMenu(). -->
+        <div class="chat-menu" id="chatMenu" hidden>
+          <button class="icon-btn" id="chatMenuBtn" type="button" title="Conversation options"
+                  aria-label="Conversation options" aria-haspopup="true" aria-expanded="false" aria-controls="chatMenuList">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="12" cy="19" r="1.9"/></svg>
+          </button>
+          <div class="menu" id="chatMenuList" role="menu" aria-labelledby="chatMenuBtn" hidden>
+            <button class="menu-item" id="menuMembers" type="button" role="menuitem">Members &amp; roles</button>
+            <button class="menu-item" id="menuAddPeople" type="button" role="menuitem">Add people</button>
+            <button class="menu-item" id="menuLeave" type="button" role="menuitem">Leave group</button>
+            <button class="menu-item danger" id="menuDelete" type="button" role="menuitem">Delete group</button>
+          </div>
+        </div>
       </header>
 
       <div class="conn-banner" id="connBanner" role="status" hidden></div>
@@ -80,7 +94,10 @@
 
   <div class="toast" id="toast" role="alert" hidden></div>
 
-  <!-- New chat: people picker backed by GET /api/users?q= -->
+  <!-- People picker backed by GET /api/users?q=. Two flows share this one dialog and one
+       search pipeline (see `picker.mode` in app.js): starting a conversation, and adding
+       people to an open group — in which case it opens on top of #membersDialog. The
+       heading, the group-name row and the submit label are what change. -->
   <dialog class="dialog picker" id="newChatDialog" aria-labelledby="newChatTitle">
     <form id="newChatForm" method="dialog">
       <h2 id="newChatTitle">New conversation</h2>
@@ -104,6 +121,48 @@
       <div class="dialog-actions">
         <button type="button" class="btn ghost" data-close>Cancel</button>
         <button type="submit" class="btn primary" id="newChatSubmit" disabled>Message</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Group details: who is in the conversation, who runs it, and the actions that change
+       that. Roles and membership come from GET /api/chats (there is no members endpoint),
+       so every successful change_role / add_member / leave is followed by a chats refresh.
+       renderMembers() fills the head, the roster and the footer; roster rows are grouped
+       by role, so no row needs to repeat its own role badge. -->
+  <dialog class="dialog panel" id="membersDialog" aria-labelledby="membersTitle" aria-describedby="membersSub">
+    <form id="membersForm" method="dialog">
+      <header class="panel-head">
+        <span class="panel-face" id="membersFace" aria-hidden="true"></span>
+        <span class="panel-head-text">
+          <h2 id="membersTitle">Members</h2>
+          <p class="panel-sub" id="membersSub"></p>
+        </span>
+      </header>
+
+      <p class="panel-note" id="membersStatus" role="status"></p>
+
+      <div class="roster" id="memberList"></div>
+
+      <div class="form-error" id="membersError" role="alert"></div>
+      <div class="dialog-actions panel-actions">
+        <button type="button" class="btn quiet caution" id="membersLeave">Leave group</button>
+        <span class="actions-spacer" aria-hidden="true"></span>
+        <button type="button" class="btn ghost" id="membersClose" data-close>Close</button>
+        <button type="button" class="btn primary" id="membersAdd">Add people</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirmation for the destructive menu items; filled in by openConfirm(). -->
+  <dialog class="dialog" id="confirmDialog" aria-labelledby="confirmTitle">
+    <form id="confirmForm" method="dialog">
+      <h2 id="confirmTitle"></h2>
+      <p class="dialog-copy" id="confirmCopy"></p>
+      <div class="form-error" id="confirmError" role="alert"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancel</button>
+        <button type="submit" class="btn danger" id="confirmOk">Delete</button>
       </div>
     </form>
   </dialog>

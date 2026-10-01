@@ -19,19 +19,42 @@
     wsStatus: "closed",
     everOpened: false,      // has the socket opened at least once
     pendingCounted: false,  // first pending map is already reflected in unread counts
-    awaitingNewChat: null,  // Set of chat_ids from just before POST /create_chat
     animate: new Set(),     // message_ids that just arrived live -- animated once, then cleared
+    hiddenDms: {},          // { [chat_id]: last_message time_sent when it was hidden } -- see HIDDEN_DMS_KEY
   };
 
-  // People picker (the "New conversation" dialog).
+  /* People picker. One dialog (#newChatDialog) and one search pipeline serve two flows,
+   * because "search people, chip them, keyboard-navigate the results" is exactly the same
+   * job in both: `mode` is "new" (create a conversation) or "add" (add people to the group
+   * in `chatId`). Only the title, the group-name row, the submit label and the submit
+   * handler differ -- everything below (debounce, AbortController, stale-response drop,
+   * chips, ↑/↓/Enter/Esc/Backspace) is shared rather than written twice. */
   const picker = {
+    mode: "new",    // "new" | "add"
+    chatId: null,   // in "add" mode, the group being added to
     selected: [],   // [{ user_id, display_name, username, avatar_url }]
     results: [],    // last search response, minus nothing -- already-chosen rows stay, marked
     active: -1,     // keyboard cursor into results
     timer: null,    // debounce
     abort: null,    // AbortController for the in-flight search
-    busy: false,    // create request in flight
+    busy: false,    // create/add request in flight
   };
+
+  // Group-details dialog (named so it can't be shadowed by the local `members` arrays).
+  const memberPanel = {
+    chatId: null,   // the group being shown; null when the dialog is closed
+    busy: null,     // user_id of the row whose change_role call is in flight
+  };
+
+  // The shared confirmation dialog: `onOk` returns null on success, or a message to show.
+  const confirmer = { onOk: null, busy: false };
+
+  /* chat_ids this client asked the server to delete. The chat_deleted frame can beat the
+   * 200 back, so the frame stays quiet for these and the request's own handler reports. */
+  const deleting = new Set();
+
+  // Same idea for leaving: `member_removed` also comes back to the leaver.
+  const leaving = new Set();
 
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -43,10 +66,20 @@
     composer: $("composer"), composerInput: $("composerInput"), sendBtn: $("sendBtn"),
     sendingHint: $("sendingHint"), toast: $("toast"),
     newChatDialog: $("newChatDialog"), newChatForm: $("newChatForm"), newChatError: $("newChatError"),
+    newChatTitle: $("newChatTitle"),
     pickerField: $("pickerField"), pickerInput: $("pickerInput"),
     pickerChips: $("pickerChips"), pickerResults: $("pickerResults"),
     pickerStatus: $("pickerStatus"), groupNameRow: $("groupNameRow"), groupNameInput: $("groupNameInput"),
     newChatSubmit: $("newChatSubmit"),
+    chatMenu: $("chatMenu"), chatMenuBtn: $("chatMenuBtn"), chatMenuList: $("chatMenuList"),
+    menuMembers: $("menuMembers"), menuAddPeople: $("menuAddPeople"),
+    menuLeave: $("menuLeave"), menuDelete: $("menuDelete"),
+    membersDialog: $("membersDialog"), membersTitle: $("membersTitle"), memberList: $("memberList"),
+    membersFace: $("membersFace"), membersSub: $("membersSub"),
+    membersStatus: $("membersStatus"), membersError: $("membersError"),
+    membersLeave: $("membersLeave"), membersAdd: $("membersAdd"), membersClose: $("membersClose"),
+    confirmDialog: $("confirmDialog"), confirmForm: $("confirmForm"), confirmTitle: $("confirmTitle"),
+    confirmCopy: $("confirmCopy"), confirmError: $("confirmError"), confirmOk: $("confirmOk"),
   };
 
   /* ---------- tiny DOM helper (never innerHTML with user content) ---------- */
@@ -112,6 +145,30 @@
   function isGroup(chat) { return (chat.members || []).length > 2; }
   function findChat(chatId) { return state.chats.find((c) => c.chat_id === chatId); }
 
+  /* GET /chats sends a real `is_dm` boolean on every chat, so this is exact; the
+   * two-member fallback only covers a response that predates the field. Note this is
+   * NOT the same question as isGroup() above, which asks "does this chat need member
+   * names in the bubbles" -- a two-person *group* is a group here and a DM there. */
+  function isDm(chat) {
+    if (!chat) return false;
+    if (typeof chat.is_dm === "boolean") return chat.is_dm;
+    return (chat.members || []).length === 2;
+  }
+
+  // Every member of GET /chats carries `role`: "admin" or "user". Both members of a DM
+  // are "user", so a DM never has an admin -- hence no admin-only actions on one.
+  function myRole(chat) {
+    if (!chat || !state.me) return null;
+    const mine = (chat.members || []).find((m) => m.user_id === state.me.user_id);
+    return mine ? mine.role : null;
+  }
+  function amAdmin(chat) { return myRole(chat) === "admin"; }
+  function adminCount(chat) {
+    return (chat && chat.members || []).filter((m) => m.role === "admin").length;
+  }
+  // The server refuses to let the last admin leave, so warn before they try.
+  function amSoleAdmin(chat) { return amAdmin(chat) && adminCount(chat) === 1; }
+
   function chatTitle(chat) {
     const members = chat.members || [];
     const others = members.filter((m) => m.user_id !== state.me.user_id);
@@ -138,6 +195,117 @@
 
   function hasLastMessage(chat) {
     return !!(chat.last_message && chat.last_message.message_id);
+  }
+
+  /* ---------- membership / role events (the `system` frame) ----------
+   * The server sends a ready-made sentence in `message` ("Ada added Cleo"), but we build
+   * our own from actor_name/target_name/event so the line can say "You" where the current
+   * user is involved -- and so it stays right if a display name changes later. An `event`
+   * we don't know falls back to the server's sentence verbatim, so a future event still
+   * renders as something instead of vanishing.
+   *
+   * `member_left` is self-initiated, so actor_id === target_id: it reads off the actor
+   * alone ("You left" / "Cleo left") and never mentions a target.
+   */
+  function systemText(f) {
+    if (!f) return "";
+    const meId = state.me ? state.me.user_id : null;
+    const iActed = meId != null && f.actor_id === meId;
+    const iAmTarget = meId != null && f.target_id === meId;
+    const actor = iActed ? "You" : (f.actor_name || "Someone");
+    const target = iAmTarget ? "you" : (f.target_name || "someone");
+    switch (f.event) {
+      case "member_added": return actor + " added " + target;
+      case "member_left":  return actor + " left";
+      case "promoted":     return actor + " made " + target + " an admin";
+      case "demoted":      return actor + " removed " + target + " as an admin";
+      default:             return String(f.message == null ? "" : f.message);
+    }
+  }
+
+  /* Is this chat's sidebar preview an event line rather than something someone said?
+   * KNOWN BACKEND GAP: the `last_message` in GET /chats carries the row's text and its
+   * sender but no `kind`/`event`, so a system row is indistinguishable from a message
+   * there. Where we do know -- a live frame marked the copy it wrote (bumpLastMessage), or
+   * the row is in this chat's loaded history -- the preview uses our own second-person copy
+   * and drops the "Name: " prefix a real message gets. Otherwise it falls back to the
+   * server's sentence, which is still readable, just prefixed. */
+  function systemLastMessage(chat) {
+    const lm = chat.last_message;
+    if (!lm || !lm.message_id) return null;
+    if (lm.type === "system") return lm;
+    const loaded = state.messagesByChat[chat.chat_id];
+    const hit = loaded && loaded.find((m) => m.message_id === lm.message_id);
+    return hit && hit.type === "system" ? hit : null;
+  }
+
+  /* ---------- locally hidden DMs ----------
+   * POST /chat/delete_chat refuses a DM, so "Delete for me" can only hide one: the
+   * chat_id goes into localStorage and the sidebar filters it out. This is per-browser
+   * by design -- there is no server-side state behind it, so the same DM is still
+   * listed on the user's other devices, and it reappears here if site data is cleared.
+   *
+   * It is also only "clear it from my list for now", WhatsApp-style, not a block: any
+   * new activity un-hides it (see unhideDm's callers -- the inbound `message` frame, the
+   * pending-messages replay, and a refresh whose unread count or last_message moved on).
+   * The stored value is the chat's last_message time at the moment it was hidden, which
+   * is the watermark that "moved on" is measured against.
+   *
+   * Every localStorage access is guarded: it throws in private mode and when site data
+   * is blocked. When it is unavailable the in-memory map still works, so hiding simply
+   * lasts for the life of the page instead of forever.
+   */
+  const HIDDEN_DMS_KEY = "chatapp.hiddenDms";
+
+  function loadHiddenDms() {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(HIDDEN_DMS_KEY) || "null");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const out = {};
+        for (const [id, mark] of Object.entries(parsed)) out[id] = typeof mark === "string" ? mark : "";
+        return out;
+      }
+    } catch (_) { /* unavailable, blocked, or corrupt -- start with nothing hidden */ }
+    return {};
+  }
+
+  function saveHiddenDms() {
+    try {
+      window.localStorage.setItem(HIDDEN_DMS_KEY, JSON.stringify(state.hiddenDms));
+    } catch (_) { /* unavailable: the in-memory map still drives this session */ }
+  }
+
+  function isHidden(chatId) {
+    return Object.prototype.hasOwnProperty.call(state.hiddenDms, chatId);
+  }
+
+  function hideDm(chat) {
+    state.hiddenDms[chat.chat_id] = hasLastMessage(chat) ? String(chat.last_message.time_sent) : "";
+    saveHiddenDms();
+  }
+
+  function unhideDm(chatId) {
+    if (!isHidden(chatId)) return false;
+    delete state.hiddenDms[chatId];
+    saveHiddenDms();
+    return true;
+  }
+
+  // Has anything happened in this hidden chat since it was hidden?
+  function newsSinceHidden(chat) {
+    if ((chat.unread_message_count || 0) > 0) return true;
+    if (!hasLastMessage(chat)) return false;
+    const mark = state.hiddenDms[chat.chat_id];
+    if (!mark) return true;                       // hidden while empty, has messages now
+    const then = parseTime(mark);
+    const now = parseTime(chat.last_message.time_sent);
+    if (isNaN(then) || isNaN(now)) return true;   // can't compare -> assume there's news
+    return now > then;
+  }
+
+  // The sidebar (and the desktop auto-select on boot) only ever sees these.
+  function visibleChats() {
+    return state.chats.filter((c) => !isHidden(c.chat_id));
   }
 
   /* ---------- time ----------
@@ -252,6 +420,15 @@
     chat.last_message = {
       message_id: m.message_id, sender_id: m.sender_id, message: m.message, time_sent: m.time_sent,
     };
+    // An event is a last_message like any other; keep what systemLastMessage() needs,
+    // since GET /chats won't tell us this row was one.
+    if (m.type === "system") {
+      Object.assign(chat.last_message, {
+        type: "system", event: m.event,
+        actor_id: m.actor_id, actor_name: m.actor_name,
+        target_id: m.target_id, target_name: m.target_name,
+      });
+    }
   }
 
   /* ---------- rendering: sidebar ---------- */
@@ -266,8 +443,9 @@
 
   function renderChatList() {
     const list = els.convList;
+    const chats = visibleChats();
     list.replaceChildren();
-    if (!state.chats.length) {
+    if (!chats.length) {
       const stage = el("div", { class: "stage" },
         el("div", { class: "stage-art" }),
         el("h2", { class: "stage-title" }, "Nothing here yet"),
@@ -278,16 +456,21 @@
       list.append(stage);
       return;
     }
-    for (const chat of state.chats) {
+    for (const chat of chats) {
       const title = chatTitle(chat);
       let preview = "No messages yet";
       let time = "";
       let timeTitle = "";
       if (hasLastMessage(chat)) {
         const lm = chat.last_message;
-        const who = lm.sender_id === state.me.user_id ? "You: "
-          : isGroup(chat) ? memberName(chat, lm.sender_id).split(/\s+/)[0] + ": " : "";
-        preview = who + lm.message;
+        const sys = systemLastMessage(chat);
+        if (sys) {
+          preview = systemText(sys);          // "You left" -- nobody said it, so nobody is named
+        } else {
+          const who = lm.sender_id === state.me.user_id ? "You: "
+            : isGroup(chat) ? memberName(chat, lm.sender_id).split(/\s+/)[0] + ": " : "";
+          preview = who + lm.message;
+        }
         const d = parseTime(lm.time_sent);
         time = fmtCoarse(d);
         timeTitle = fullStamp(d);
@@ -315,6 +498,7 @@
   const STACK_MAX = 3;
 
   function renderHeader(chat) {
+    renderChatMenu(chat);
     if (!chat) {
       els.chatHead.hidden = true;
       els.chatTitle.textContent = "";
@@ -348,6 +532,20 @@
 
   function scrollToBottom() {
     els.messages.scrollTop = els.messages.scrollHeight;
+  }
+
+  /* One centred, full-width divider line -- no bubble, no avatar, no side -- so an event
+   * can't be mistaken for something a person said. The time carries the same `title`
+   * tooltip as a bubble's .meta stamp, built by the same fullStamp(). */
+  function systemLineEl(m, d) {
+    const stamp = fullStamp(d);
+    const time = isNaN(d) ? "" : fmtTime(d);
+    return el("div", {
+      class: "sys" + (state.animate.has(m.message_id) ? " enter" : ""),
+    },
+      el("span", { class: "sys-text", title: stamp || null },
+        systemText(m),
+        time ? el("span", { class: "sys-time" }, time) : null));
   }
 
   // mode: "bottom" (jump to end) | "stick" (stay at end only if already there) | "prepend" (keep viewport)
@@ -390,6 +588,17 @@
       const nextDate = next ? parseTime(next.time_sent) : null;
       const newDay = !prev || !sameDay(prevDate, d);
       if (newDay) box.append(el("div", { class: "day" }, fmtDay(d)));
+
+      /* An event still becomes `prev`, and it carries no sender_id, so the bubble that
+       * follows it always reads as a group start and the bubble before it as a group end
+       * (which is also what makes that one show its timestamp). An event visibly breaks a
+       * run, which is exactly what a divider is for. */
+      if (m.type === "system") {
+        box.append(systemLineEl(m, d));
+        prev = m;
+        prevDate = d;
+        return;
+      }
 
       const groupStart = newDay || prev.sender_id !== m.sender_id || d - prevDate > GROUP_GAP_MS;
       const groupEnd = !next || next.sender_id !== m.sender_id || !sameDay(d, nextDate) || nextDate - d > GROUP_GAP_MS;
@@ -460,6 +669,7 @@
     if (!chat) return;
     state.activeChatId = chatId;
     chat.unread_message_count = 0;
+    unhideDm(chatId);              // deliberately opening a hidden DM brings it back
     document.body.dataset.view = "chat";
     renderChatList();
     renderHeader(chat);
@@ -478,6 +688,8 @@
     state.loadingHistory[chatId] = true;
     try {
       const res = await API.getMessages(chatId, { limit: PAGE_SIZE, offset });
+      // The chat may have been deleted out from under us while the page was in flight.
+      if (!findChat(chatId)) return false;
       const page = Array.isArray(res.data) ? res.data : [];
       if (!state.messagesByChat[chatId]) state.messagesByChat[chatId] = [];
       mergeFrames(chatId, page);
@@ -512,18 +724,57 @@
         const old = oldById.get(c.chat_id);
         if (old && state.everOpened) c.unread_message_count = old.unread_message_count;
         if (c.chat_id === state.activeChatId) c.unread_message_count = 0;
+        /* Same row, but the fresh copy lost the marker that says it was an event (see
+         * systemLastMessage) -- keep the one we already recognised. */
+        if (old && hasLastMessage(old) && hasLastMessage(c)
+            && old.last_message.type === "system"
+            && old.last_message.message_id === c.last_message.message_id) {
+          c.last_message = old.last_message;
+        }
+      }
+      // A locally hidden DM comes back as soon as there is something new in it, and a
+      // chat that no longer exists has nothing left to hide.
+      for (const id of Object.keys(state.hiddenDms)) {
+        const c = fresh.find((x) => x.chat_id === id);
+        if (!c || newsSinceHidden(c)) unhideDm(id);
       }
       state.chats = fresh;
       sortChats();
       renderChatList();
-      if (state.activeChatId && !findChat(state.activeChatId)) {
-        state.activeChatId = null;
-        renderHeader(null);
-        showChatPane(false);
-      }
+      if (state.activeChatId && !findChat(state.activeChatId)) clearSelection();
+      // Roles, names and membership may all have moved -- the header and its menu read them.
+      else if (state.activeChatId) renderHeader(findChat(state.activeChatId));
+      if (memberPanel.chatId) renderMembers();
     } catch (e) {
       if (!e.redirected) toast(e.message || "Couldn't load chats");
     }
+  }
+
+  // Nothing is open any more: drop back to the empty state (and, on mobile, to the list,
+  // since the chat pane has nothing left to show).
+  function clearSelection() {
+    state.activeChatId = null;
+    showChatPane(false);                  // also clears the header and its menu
+    updateComposer();
+    if (!DESKTOP.matches) document.body.dataset.view = "list";
+  }
+
+  /* Forget a chat completely: its sidebar row, every cached page of its messages and the
+   * selection if it was open. Idempotent on purpose -- the deleter gets the chat_deleted
+   * frame too and has usually cleaned up already, and the frame can also arrive twice or
+   * for a chat this client never loaded. Returns whether the chat was actually known. */
+  function dropChat(chatId) {
+    const had = !!findChat(chatId);
+    state.chats = state.chats.filter((c) => c.chat_id !== chatId);
+    delete state.messagesByChat[chatId];
+    delete state.hasMoreByChat[chatId];
+    delete state.loadingHistory[chatId];
+    delete state.liveBuffer[chatId];
+    unhideDm(chatId);                     // gone for good; no point remembering it's hidden
+    if (memberPanel.chatId === chatId && els.membersDialog.open) els.membersDialog.close();
+    if (state.activeChatId === chatId) clearSelection();
+    renderChatList();
+    return had;
   }
 
   // How long to wait for the server's ack before assuming the frame went nowhere.
@@ -590,6 +841,7 @@
     WS.on("message", (m) => {
       const chat = findChat(m.chat_id);
       if (!chat) { refreshChats(); return; }
+      unhideDm(m.chat_id);          // activity brings a locally hidden DM back into the list
       if (storeIncoming(m.chat_id, [m]) > 0) state.animate.add(m.message_id);
       bumpLastMessage(chat, m);
       const mine = isMine(m);
@@ -599,11 +851,87 @@
       if (m.chat_id === state.activeChatId) renderMessages(m.chat_id, mine ? "bottom" : "stick");
     });
 
+    /* ---- system (membership/role) frames ----
+     * Treated exactly like a message as far as the timeline goes: stored, de-duped and
+     * ordered by time_sent, then drawn by the one renderer, so a reload looks like what
+     * the user just watched happen. Nothing is synthesized locally when *we* act -- the
+     * frame (or history) is the only thing that puts a line on screen, same as own
+     * messages. These rows write no message_status, so they never touch unread counts.
+     *
+     * They are also the first notice every *watching* member gets that the roster moved
+     * (`member_added` / `member_removed` only reach the one person they are about), so this
+     * is the right moment to re-read GET /chats for roles and the header's member count. */
+    WS.on("system", (f) => {
+      if (!f || !f.chat_id) return;
+      const chat = findChat(f.chat_id);
+      if (!chat) { refreshChats(); return; }      // an event in a chat we don't have yet
+      if (storeIncoming(f.chat_id, [f]) > 0) state.animate.add(f.message_id);
+      bumpLastMessage(chat, f);
+      sortChats();
+      renderChatList();
+      if (f.chat_id === state.activeChatId) {
+        // We caused it -> follow it down; somebody else did -> only if already at the end.
+        const mine = !!state.me && f.actor_id === state.me.user_id;
+        renderMessages(f.chat_id, mine ? "bottom" : "stick");
+      }
+      refreshChats();
+    });
+
     WS.on("chat_created", (f) => {
-      // The chat we just asked for? Refresh and open it (adoptNewChat is idempotent).
-      if (state.awaitingNewChat && !state.awaitingNewChat.has(f.chat_id)) { adoptNewChat(); return; }
-      // Otherwise someone else added us: pull the sidebar entry if we don't have it.
+      /* This frame never opens a chat, it only pulls the sidebar entry in -- whether we
+       * created the chat or someone else added us. Opening is the job of the POST
+       * /create_chat response, which now carries the chat_id, so the frame and the
+       * response can arrive in either order without double-selecting or fighting over
+       * state.activeChatId. */
       if (!findChat(f.chat_id)) refreshChats();
+    });
+
+    WS.on("chat_deleted", (f) => {
+      /* Pushed to every member with a live socket when a group is deleted -- the deleter
+       * included, who has usually cleaned up already after the 200. dropChat() is
+       * idempotent, so this only has to decide whether there is anything to say. */
+      if (!f || !f.chat_id) return;
+      const wasActive = state.activeChatId === f.chat_id;
+      const chat = findChat(f.chat_id);
+      const name = chat ? chatTitle(chat) : null;
+      if (!dropChat(f.chat_id)) return;                  // already gone: nothing happened here
+      if (deleting.has(f.chat_id)) return;               // our own delete; it does the talking
+      // Worth saying either way, but especially if it just vanished from under them.
+      toast(wasActive ? "“" + name + "” was deleted" : "“" + name + "” was deleted by an admin");
+    });
+
+    /* ---- membership frames ----
+     * KNOWN BACKEND LIMITATION, not a frontend bug: `member_added` and `member_removed`
+     * are published to the ONE user they are about and to nobody else. When an admin adds
+     * C to a group, A and B are never told, so their `members` arrays (and the header's
+     * member count, and this panel) stay stale until their next GET /chats. There is no
+     * members endpoint, so /chats is the only cure. Consequences, all handled:
+     *   - the acting admin refreshes by hand after its own 200 (submitAddPeople, leaveGroup);
+     *   - a `member_added` here means *we* were added, possibly to a chat we have never
+     *     seen -- refresh so it appears in the sidebar;
+     *   - a `member_removed` here means *we* are out, so the chat is gone for us.
+     * Everyone else just finds out late, on their next refresh (a reconnect does one).
+     */
+    WS.on("member_added", async (f) => {
+      if (!f || !f.chat_id) return;
+      const known = !!findChat(f.chat_id);
+      await refreshChats();
+      const chat = findChat(f.chat_id);
+      // Only worth announcing when it really is new to us -- being added is otherwise
+      // indistinguishable from the membership churn of a chat we already have open.
+      if (!known && chat) toast("You were added to “" + chatTitle(chat) + "”");
+    });
+
+    WS.on("member_removed", (f) => {
+      /* Reaches the leaver after their own 200 as well, so take the same line as
+       * chat_deleted: dropChat() is idempotent and `leaving` keeps the frame from
+       * toasting over the message leaveGroup() already showed. */
+      if (!f || !f.chat_id) return;
+      const chat = findChat(f.chat_id);
+      const name = chat ? chatTitle(chat) : null;
+      if (!dropChat(f.chat_id)) return;                  // already gone: nothing to say
+      if (leaving.has(f.chat_id)) return;                // our own leave; it does the talking
+      toast("You're no longer in “" + name + "”");
     });
 
     WS.on("pending", (map) => {
@@ -616,6 +944,7 @@
         if (!Array.isArray(frames) || !frames.length) continue;
         const chat = findChat(chatId);
         if (!chat) { unknownChat = true; continue; }
+        unhideDm(chatId);           // offline-delivered messages count as activity too
         storeIncoming(chatId, frames);
         for (const f of frames) bumpLastMessage(chat, f);
         if (countNew && chatId !== state.activeChatId) {
@@ -655,19 +984,43 @@
     if (picker.abort) { picker.abort.abort(); picker.abort = null; }
   }
 
-  function openNewChat() {
+  /* The one entry point into the picker dialog. `mode` picks which flow submits it; in
+   * "add" mode the dialog is opened on top of the group-details panel, which stays
+   * underneath (the same stacking "Step down" already relies on). */
+  function openPeoplePicker({ mode, chatId, title }) {
     cancelSearch();
+    picker.mode = mode;
+    picker.chatId = chatId || null;
     picker.selected = [];
     picker.results = [];
     picker.active = -1;
     picker.busy = false;
+    els.newChatTitle.textContent = title;
     els.pickerInput.value = "";
     els.groupNameInput.value = "";
     els.newChatError.textContent = "";
     els.pickerStatus.textContent = "";
     renderPicker();
-    els.newChatDialog.showModal();
+    if (!els.newChatDialog.open) els.newChatDialog.showModal();
     els.pickerInput.focus();
+  }
+
+  function openNewChat() {
+    openPeoplePicker({ mode: "new", title: "New conversation" });
+  }
+
+  // Admin-only, group-only: adds people to the chat the panel/menu is about.
+  function openAddPeople(chat) {
+    const target = chat || findChat(state.activeChatId);
+    if (!target || isDm(target) || !amAdmin(target)) return;
+    // chat_name can be 255 characters; the dialog heading is display type, so clamp it
+    // rather than letting one group push the whole card down the screen.
+    const name = chatTitle(target);
+    openPeoplePicker({
+      mode: "add",
+      chatId: target.chat_id,
+      title: "Add people to “" + (name.length > 36 ? name.slice(0, 35).trimEnd() + "…" : name) + "”",
+    });
   }
 
   function closePicker() {
@@ -683,10 +1036,22 @@
 
   function renderPickerMode() {
     const n = picker.selected.length;
-    els.groupNameRow.hidden = n < 2;                       // a DM's title comes from its members
-    els.newChatSubmit.textContent = n >= 2 ? "Create group" : "Message";
+    const adding = picker.mode === "add";
+    els.groupNameRow.hidden = adding || n < 2;             // a DM's title comes from its members
+    els.newChatSubmit.textContent = adding
+      ? (n > 1 ? "Add " + n + " people" : "Add")
+      : (n >= 2 ? "Create group" : "Message");
     els.newChatSubmit.disabled = n === 0 || picker.busy;
     els.newChatDialog.classList.toggle("has-chips", n > 0);
+  }
+
+  /* In "add" mode the people already in the group come back from the search like anyone
+   * else (the endpoint only excludes the caller), so they are shown but not selectable --
+   * clearer than silently dropping them, which reads as "that person doesn't exist". */
+  function alreadyInChat(userId) {
+    if (picker.mode !== "add") return false;
+    const chat = findChat(picker.chatId);
+    return !!chat && (chat.members || []).some((m) => m.user_id === userId);
   }
 
   function renderChips() {
@@ -709,7 +1074,8 @@
     const chosen = new Set(picker.selected.map((u) => u.user_id));
     picker.results.forEach((u, i) => {
       const name = u.display_name || u.username;
-      const already = chosen.has(u.user_id);
+      const inChat = alreadyInChat(u.user_id);
+      const already = inChat || chosen.has(u.user_id);
       list.append(el("li", {
         class: "picker-row" + (i === picker.active ? " active" : "") + (already ? " chosen" : ""),
         role: "option",
@@ -721,7 +1087,7 @@
         el("span", { class: "picker-row-main" },
           el("span", { class: "picker-row-name" }, name),
           el("span", { class: "picker-row-handle" }, "@" + u.username)),
-        already ? el("span", { class: "picker-row-tag" }, "Added") : null));
+        already ? el("span", { class: "picker-row-tag" }, inChat ? "Already in" : "Added") : null));
     });
     els.pickerInput.setAttribute("aria-expanded", picker.results.length ? "true" : "false");
     if (picker.active >= 0) els.pickerInput.setAttribute("aria-activedescendant", "picker-opt-" + picker.active);
@@ -780,6 +1146,7 @@
 
   function pickerAdd(u) {
     if (!u || picker.selected.some((s) => s.user_id === u.user_id)) return;   // no-op
+    if (alreadyInChat(u.user_id)) return;      // marked "Already in"; Enter/click are no-ops
     picker.selected.push(u);
     cancelSearch();
     picker.results = [];
@@ -797,40 +1164,49 @@
     els.pickerInput.focus();
   }
 
-  /* POST /create_chat returns { "Success": ... } and no chat_id, so the new chat is
-   * whichever id shows up that wasn't there before the call. Two things can reveal
-   * it -- our own refresh, and the server's chat_created control frame -- so both
-   * funnel through here and the first one to find it wins. */
-  let adopting = null;
-  function adoptNewChat() {
-    if (!state.awaitingNewChat) return Promise.resolve(false);
-    if (adopting) return adopting;
-    const before = state.awaitingNewChat;
-    adopting = (async () => {
-      await refreshChats();
-      if (state.awaitingNewChat !== before) return false;
-      const fresh = state.chats.find((c) => !before.has(c.chat_id));
-      if (!fresh) return false;
-      state.awaitingNewChat = null;
-      await selectChat(fresh.chat_id);
-      els.composerInput.focus();
-      return true;
-    })().finally(() => { adopting = null; });
-    return adopting;
+  /* GET /chats now carries `is_dm`, so "the DM with this person" is exact: it no longer
+   * matches a two-person *group* that happens to include them, which is what the old
+   * members.length === 2 guess did. A locally hidden DM still counts -- messaging that
+   * person again is exactly the activity that should bring it back (selectChat below
+   * un-hides it), not a reason to create a second one the server would 409 anyway. */
+  function findDmWith(userId) {
+    return state.chats.find(
+      (c) => isDm(c) && (c.members || []).some((m) => m.user_id === userId));
   }
 
-  async function submitNewChat(ev) {
+  /* POST /create_chat returns { chat_id }, so there is nothing to guess any more: refresh
+   * for the chat's members and metadata, then open it. The old snapshot-diffing
+   * adoptNewChat() is gone with the guesswork, and with it the awaitingNewChat/claimed
+   * staleness dance -- this is the only path that selects a newly created chat, so it
+   * cannot race the chat_created frame (which just refreshes the sidebar). The refresh is
+   * skipped when that frame already brought the chat in. */
+  async function openCreatedChat(chatId) {
+    if (!chatId) return false;
+    if (!findChat(chatId)) await refreshChats();
+    if (!findChat(chatId)) return false;
+    await selectChat(chatId);
+    els.composerInput.focus();
+    return true;
+  }
+
+  // One <form>, two flows -- see the comment on `picker`.
+  function submitPicker(ev) {
     ev.preventDefault();
+    if (picker.mode === "add") submitAddPeople();
+    else submitNewChat();
+  }
+
+  async function submitNewChat() {
     if (picker.busy || !picker.selected.length) return;
     els.newChatError.textContent = "";
     const chosen = picker.selected.slice();
     const isDm = chosen.length === 1;
 
-    // The backend has no DM-uniqueness check, so a second DM with the same person
-    // would silently create a second chat. Open the one we already have instead.
+    // The server rejects a duplicate DM itself (chats.dm_key is UNIQUE) with a 409, which
+    // the catch below recovers from -- this check just saves that round trip when the chat
+    // is already in our list. Groups are deliberately not deduped, here or server-side.
     if (isDm) {
-      const existing = state.chats.find(
-        (c) => (c.members || []).length === 2 && c.members.some((m) => m.user_id === chosen[0].user_id));
+      const existing = findDmWith(chosen[0].user_id);
       if (existing) {
         closePicker();
         await selectChat(existing.chat_id);
@@ -849,20 +1225,431 @@
 
     picker.busy = true;
     renderPickerMode();
-    state.awaitingNewChat = new Set(state.chats.map((c) => c.chat_id));
-    const claimed = state.awaitingNewChat;
-    // Don't let a stale flag hijack an unrelated chat_created frame later on.
-    setTimeout(() => { if (state.awaitingNewChat === claimed) state.awaitingNewChat = null; }, 15000);
     try {
-      await API.createChat({ chat_name: name, chat_users: chosen.map((u) => u.user_id), is_dm: isDm });
+      const res = await API.createChat({ chat_name: name, chat_users: chosen.map((u) => u.user_id), is_dm: isDm });
       closePicker();
-      await adoptNewChat();
+      if (!(await openCreatedChat(res && res.chat_id))) toast("Conversation created, but it didn't show up yet.");
     } catch (e) {
-      if (state.awaitingNewChat === claimed) state.awaitingNewChat = null;
-      if (!(e && e.redirected)) els.newChatError.textContent = e.message || "Couldn't start the conversation.";
+      if (e && e.redirected) return;
+      /* 409 means the DM exists server-side but wasn't in state.chats when the pre-check
+       * ran (another device made it, or our list is stale). That's success, not failure:
+       * pull the list and open it rather than showing the raw "chat already exists". */
+      if (e && e.status === 409) {
+        await refreshChats();
+        const existing = isDm ? findDmWith(chosen[0].user_id) : null;
+        if (existing) {
+          closePicker();
+          await selectChat(existing.chat_id);
+          els.composerInput.focus();
+        } else {
+          els.newChatError.textContent = "You already have this conversation, but it isn't loading — try again.";
+        }
+      } else {
+        els.newChatError.textContent = e.message || "Couldn't start the conversation.";
+      }
     } finally {
       picker.busy = false;
       renderPickerMode();
+    }
+  }
+
+  /* ---------- adding people to a group ----------
+   * The 400 the server sends for a duplicate has the raw user id in it ("User 16 is
+   * already a member of this chat!"), and it fires before anything is inserted -- the
+   * endpoint checks every id first -- so the honest report names the person and says
+   * nobody was added.
+   */
+  const DUP_MEMBER_RE = /^User (\d+) is already a member of this chat!$/;
+
+  function addProblem(e, chosen) {
+    const dup = e && typeof e.message === "string" ? DUP_MEMBER_RE.exec(e.message) : null;
+    if (!dup) return friendly(e, "Couldn't add anyone to this group.");
+    const who = chosen.find((u) => String(u.user_id) === dup[1]);
+    const name = who ? (who.display_name || who.username) : "Someone";
+    return name + " is already in this group — nobody was added.";
+  }
+
+  async function submitAddPeople() {
+    if (picker.busy || !picker.selected.length) return;
+    const chat = findChat(picker.chatId);
+    if (!chat) { els.newChatError.textContent = "This group is no longer available."; return; }
+    const chosen = picker.selected.slice();
+    els.newChatError.textContent = "";
+    picker.busy = true;
+    renderPickerMode();
+    try {
+      await API.addMembers(chat.chat_id, chosen.map((u) => u.user_id));
+      closePicker();
+      /* Only the people we just added get a `member_added` frame -- we don't, and neither
+       * do the other members -- so our own membership is the stale copy. GET /chats is the
+       * only source of members and roles, so re-read it; that also re-renders the header
+       * count and the group-details panel underneath. */
+      await refreshChats();
+      toast(chosen.length === 1
+        ? (chosen[0].display_name || chosen[0].username) + " was added"
+        : chosen.length + " people were added");
+    } catch (e) {
+      if (e && e.redirected) return;
+      els.newChatError.textContent = addProblem(e, chosen);
+      // A duplicate or a lost admin role both mean our copy of the group is behind.
+      if (e && (e.status === 400 || e.status === 403)) refreshChats();
+    } finally {
+      picker.busy = false;
+      renderPickerMode();
+    }
+  }
+
+  /* ---------- conversation menu ----------
+   * What the menu offers depends on the chat and on your role in it. In a group: everyone
+   * gets "Members & roles" and "Leave group", an admin also gets "Add people" and "Delete
+   * group". A DM has no admin at all and the server refuses to delete or leave one, so it
+   * only offers "Delete for me", which hides it locally.
+   */
+  function renderChatMenu(chat) {
+    closeChatMenu();
+    if (!chat) { els.chatMenu.hidden = true; return; }
+    const dm = isDm(chat);
+    const admin = amAdmin(chat);
+    els.menuMembers.hidden = dm;                        // a DM's two people are in the header already
+    els.menuAddPeople.hidden = dm || !admin;            // the server refuses both cases anyway
+    els.menuLeave.hidden = dm;                          // any member can leave a group; nobody a DM
+    els.menuDelete.hidden = !dm && !admin;              // only an admin can delete a group
+    els.menuDelete.textContent = dm ? "Delete for me" : "Delete group";
+    els.chatMenu.hidden = menuItems().length === 0;
+  }
+
+  function menuItems() {
+    return [els.menuMembers, els.menuAddPeople, els.menuLeave, els.menuDelete]
+      .filter((b) => !b.hidden);
+  }
+
+  function openChatMenu() {
+    els.chatMenuList.hidden = false;
+    els.chatMenuBtn.setAttribute("aria-expanded", "true");
+    const first = menuItems()[0];
+    if (first) first.focus();
+  }
+
+  function closeChatMenu(refocus) {
+    if (!els.chatMenuList || els.chatMenuList.hidden) return;
+    els.chatMenuList.hidden = true;
+    els.chatMenuBtn.setAttribute("aria-expanded", "false");
+    if (refocus) els.chatMenuBtn.focus();
+  }
+
+  function toggleChatMenu() {
+    if (els.chatMenuList.hidden) openChatMenu();
+    else closeChatMenu(true);
+  }
+
+  function moveMenu(delta) {
+    const items = menuItems();
+    if (!items.length) return;
+    const at = items.indexOf(document.activeElement);
+    const next = at < 0 ? (delta > 0 ? 0 : items.length - 1) : (at + delta + items.length) % items.length;
+    items[next].focus();
+  }
+
+  /* ---------- confirmation dialog ----------
+   * One dialog for both destructive menu items. `onOk` does the work and returns null on
+   * success or a message on failure, so the dialog can stay open and explain itself.
+   */
+  function openConfirm({ title, copy, okLabel, onOk }) {
+    confirmer.onOk = onOk;
+    confirmer.busy = false;
+    els.confirmTitle.textContent = title;
+    els.confirmCopy.textContent = copy;
+    els.confirmOk.textContent = okLabel;
+    els.confirmError.textContent = "";
+    els.confirmOk.disabled = false;
+    els.confirmDialog.showModal();
+    els.confirmOk.focus();
+  }
+
+  async function submitConfirm(ev) {
+    ev.preventDefault();                       // method="dialog" would close before onOk ran
+    if (confirmer.busy || !confirmer.onOk) return;
+    confirmer.busy = true;
+    els.confirmOk.disabled = true;
+    els.confirmError.textContent = "";
+    let problem = null;
+    try {
+      problem = await confirmer.onOk();
+    } catch (e) {
+      if (e && e.redirected) return;
+      problem = (e && e.message) || "That didn't work.";
+    } finally {
+      confirmer.busy = false;
+      els.confirmOk.disabled = false;
+    }
+    if (problem) { els.confirmError.textContent = problem; return; }
+    if (els.confirmDialog.open) els.confirmDialog.close();
+  }
+
+  /* ---------- deleting a conversation ---------- */
+
+  /* The server's 403 details are accurate but shouty, and the last-admin one is an
+   * ordinary outcome rather than an error, so the ones a user can actually hit get
+   * rewritten. Anything unmapped falls through to the detail text as-is. */
+  const FRIENDLY = {
+    "There must be at least one admin in the chat!":
+      "A group needs at least one admin. Make someone else an admin first.",
+    "You are not an admin of this chat!": "Only an admin can do that.",
+    "You are not a member of this chat!": "You're not in this conversation any more.",
+    "You can't delete a DM chat!": "Direct messages can't be deleted — hide it with “Delete for me” instead.",
+    "You can't leave a DM chat!": "Direct messages can't be left — hide it with “Delete for me” instead.",
+    "You can't add members to a DM!": "You can't add anyone to a direct message. Start a group instead.",
+  };
+  // The sole-admin 403 is shared by change_role and leave; leaving needs its own wording,
+  // because "make someone else an admin" is the literal next step rather than a policy note.
+  const NEED_ANOTHER_ADMIN = "There must be at least one admin in the chat!";
+  function friendly(e, fallback) {
+    return (e && FRIENDLY[e.message]) || (e && e.message) || fallback;
+  }
+
+  async function deleteGroup(chat) {
+    deleting.add(chat.chat_id);
+    try {
+      await API.deleteChat(chat.chat_id);
+      /* The chat_deleted frame normally does the cleanup (we get it too), but the socket
+       * may be down or dead -- after a 200 the chat is gone either way, so clean up now.
+       * dropChat() is idempotent, so whichever of the two arrives second does nothing. */
+      dropChat(chat.chat_id);
+      toast("Group deleted");
+      return null;
+    } catch (e) {
+      if (e && e.redirected) return null;
+      if (e && e.status === 404) { dropChat(chat.chat_id); return null; }   // already gone
+      return friendly(e, "Couldn't delete this group.");
+    } finally {
+      deleting.delete(chat.chat_id);
+    }
+  }
+
+  function hideDmLocally(chat) {
+    hideDm(chat);
+    if (state.activeChatId === chat.chat_id) clearSelection();
+    renderChatList();
+    toast("Hidden on this device");
+    return null;
+  }
+
+  function askDelete() {
+    const chat = findChat(state.activeChatId);
+    if (!chat) return;
+    const title = chatTitle(chat);
+    if (isDm(chat)) {
+      openConfirm({
+        title: "Delete for me?",
+        copy: "“" + title + "” leaves your list in this browser only. " +
+          "The other person keeps the conversation, and it comes back here if they write again.",
+        okLabel: "Delete for me",
+        onOk: () => hideDmLocally(chat),
+      });
+      return;
+    }
+    if (!amAdmin(chat)) { toast("Only an admin can delete this group."); return; }
+    openConfirm({
+      title: "Delete this group?",
+      copy: "“" + title + "” and every message in it are deleted for all " +
+        (chat.members || []).length + " members. This can't be undone.",
+      okLabel: "Delete group",
+      onOk: () => deleteGroup(chat),
+    });
+  }
+
+  /* ---------- leaving a group ---------- */
+
+  async function leaveGroup(chat) {
+    const title = chatTitle(chat);
+    leaving.add(chat.chat_id);
+    try {
+      await API.leaveChat(chat.chat_id);
+      /* The `member_removed` frame comes back to us and would do this, but the socket may
+       * be down or dead and after a 200 we are out either way. dropChat() is idempotent,
+       * so whichever of the two lands second does nothing -- and it closes the
+       * group-details panel this was very likely launched from. */
+      dropChat(chat.chat_id);
+      toast("You left “" + title + "”");
+      return null;
+    } catch (e) {
+      if (e && e.redirected) return null;
+      if (e && e.message === NEED_ANOTHER_ADMIN) {
+        return "You're the only admin. Make someone else an admin in “Members & roles” before you leave.";
+      }
+      // Already out (a second leave 403s the same way): finish the cleanup quietly.
+      if (e && e.message === "You are not a member of this chat!") {
+        dropChat(chat.chat_id);
+        return null;
+      }
+      return friendly(e, "Couldn't leave this group.");
+    } finally {
+      leaving.delete(chat.chat_id);
+    }
+  }
+
+  function askLeave(chat) {
+    const target = chat || findChat(state.activeChatId);
+    if (!target || isDm(target)) return;
+    const title = chatTitle(target);
+    // Pre-empt the sole-admin 403 with the same guidance, so the dead end is visible
+    // before the click rather than after it.
+    const copy = amSoleAdmin(target)
+      ? "You're the only admin of “" + title + "”. Make someone else an admin first — " +
+        "open “Members & roles”, promote them, then you can leave."
+      : "You'll stop getting messages in “" + title + "” and it leaves your list. " +
+        "An admin would have to add you back.";
+    openConfirm({ title: "Leave this group?", copy, okLabel: "Leave group", onOk: () => leaveGroup(target) });
+  }
+
+  /* ---------- group details: members, roles, membership ----------
+   * There is no members endpoint: GET /chats is the only source of `role` and of the
+   * roster itself, so every successful change_role / add_member / leave is followed by
+   * refreshChats(), which calls renderMembers() again while this panel is open.
+   *
+   * The roster is grouped by role instead of tagging every row, which is what made the
+   * old flat list noisy: with "Admins" and "Members" as headings, a row only has to say
+   * who it is. The actions are deliberately unequal -- "Make admin" is an outlined chip
+   * you reach for, while "Demote"/"Step down" is quiet text that only turns red under the
+   * cursor -- so the significant action no longer looks like the benign one.
+   */
+  function openMembers() {
+    const chat = findChat(state.activeChatId);
+    if (!chat || isDm(chat)) return;
+    memberPanel.chatId = chat.chat_id;
+    memberPanel.busy = null;
+    els.membersError.textContent = "";
+    renderMembers();
+    if (!els.membersDialog.open) els.membersDialog.showModal();
+    // Land focus on something non-destructive: the primary action if there is one,
+    // otherwise Close. Never the Leave button, which <dialog> would pick on its own.
+    (els.membersAdd.hidden ? els.membersClose : els.membersAdd).focus();
+  }
+
+  function memberRow(chat, m, iAmAdmin) {
+    const self = !!state.me && m.user_id === state.me.user_id;
+    const isAdminRow = m.role === "admin";
+    const name = m.display_name || "Someone";
+    const saving = memberPanel.busy === m.user_id;
+    /* Every admin row keeps its control even when this client thinks it is the last admin
+     * (our roles can be stale, and the server is the judge): the confirmation says so up
+     * front instead, and the 403 is rewritten if it still lands. */
+    let action = null;
+    if (iAmAdmin) {
+      // The visible label is short by design, so the accessible name says who it is about.
+      const label = self && isAdminRow ? "Step down as admin"
+        : isAdminRow ? "Demote " + name + " to member"
+          : "Make " + name + " an admin";
+      action = el("button", {
+        type: "button",
+        class: "row-action" + (isAdminRow ? " caution" : ""),
+        "aria-label": label,
+        disabled: memberPanel.busy !== null,
+        onclick: () => (self && isAdminRow
+          ? askStepDown(chat, m)
+          : applyRole(m.user_id, isAdminRow ? "user" : "admin")),
+      }, saving ? "Saving…" : self && isAdminRow ? "Step down" : isAdminRow ? "Demote" : "Make admin");
+    }
+    return el("li", { class: "roster-row" + (saving ? " saving" : "") },
+      avatarEl(name, "user:" + m.user_id, m.avatar_url),
+      el("span", { class: "roster-main" },
+        el("span", { class: "roster-name" }, name),
+        self ? el("span", { class: "roster-you" }, "You") : null),
+      action);
+  }
+
+  function rosterGroup(chat, caption, people, iAmAdmin) {
+    if (!people.length) return null;
+    return el("section", { class: "roster-group" },
+      el("h3", { class: "roster-cap" },
+        el("span", null, caption),
+        el("span", { class: "roster-count" }, String(people.length))),
+      el("ul", { class: "roster-list", role: "list" },
+        people.map((m) => memberRow(chat, m, iAmAdmin))));
+  }
+
+  function renderMembers() {
+    const chat = findChat(memberPanel.chatId);
+    els.memberList.replaceChildren();
+    els.membersFace.replaceChildren();
+    if (!chat) {
+      els.membersTitle.textContent = "Members";
+      els.membersSub.textContent = "";
+      els.membersStatus.textContent = "This conversation is no longer available.";
+      els.membersAdd.hidden = true;
+      els.membersLeave.hidden = true;
+      return;
+    }
+
+    const title = chatTitle(chat);
+    const members = (chat.members || []).slice();
+    const admins = adminCount(chat);
+    const iAmAdmin = amAdmin(chat);
+
+    els.membersTitle.textContent = title;
+    els.membersFace.append(avatarEl(title, chatAvatarSeed(chat), null, "avatar-lg"));
+    els.membersSub.textContent =
+      members.length + (members.length === 1 ? " member" : " members") +
+      " · " + admins + (admins === 1 ? " admin" : " admins");
+    els.membersStatus.textContent = iAmAdmin
+      ? (admins === 1
+        ? "You're the only admin. Make someone else one before you step down or leave."
+        : "You're an admin: you can add people and change who else is an admin.")
+      : "Only an admin can add people or change roles.";
+    els.membersAdd.hidden = !iAmAdmin;
+    els.membersLeave.hidden = false;
+    els.memberList.setAttribute("aria-busy", memberPanel.busy !== null ? "true" : "false");
+
+    // By name inside each group; the groups themselves put the people who can act first.
+    const byName = (a, b) =>
+      String(a.display_name || "").localeCompare(String(b.display_name || ""));
+    const groups = [
+      rosterGroup(chat, "Admins", members.filter((m) => m.role === "admin").sort(byName), iAmAdmin),
+      rosterGroup(chat, "Members", members.filter((m) => m.role !== "admin").sort(byName), iAmAdmin),
+    ].filter(Boolean);
+    if (!groups.length) {
+      els.memberList.append(el("p", { class: "roster-empty" }, "Nobody is in this group."));
+      return;
+    }
+    els.memberList.append(...groups);
+  }
+
+  /* Giving up your own admin rights is one click you can't take back yourself, so it goes
+   * through the same confirmation as a delete -- and it opens on top of this panel, which
+   * stays underneath. A sole admin is warned before the click; the server refuses it, and
+   * applyRole() rewrites that 403 if they go ahead anyway. */
+  function askStepDown(chat, member) {
+    openConfirm({
+      title: "Step down as admin?",
+      copy: amSoleAdmin(chat)
+        ? "You're the only admin of this group, so this won't go through until someone " +
+          "else is one. Make another member an admin first, then step down."
+        : "You'll become a regular member of this group and won't be able to delete it " +
+          "or change roles. Another admin would have to make you one again.",
+      okLabel: "Step down",
+      onOk: () => applyRole(member.user_id, "user"),
+    });
+  }
+
+  // Returns null on success, or the message to show — so openConfirm() can use it too.
+  async function applyRole(userId, newRole) {
+    const chat = findChat(memberPanel.chatId);
+    if (!chat || memberPanel.busy !== null) return null;
+    memberPanel.busy = userId;
+    els.membersError.textContent = "";
+    renderMembers();
+    try {
+      await API.changeRole(chat.chat_id, userId, newRole);
+      memberPanel.busy = null;
+      await refreshChats();              // the only place roles come from; re-renders the list
+      return null;
+    } catch (e) {
+      memberPanel.busy = null;
+      if (e && e.redirected) return null;
+      const problem = friendly(e, "Couldn't change that role.");
+      els.membersError.textContent = problem;
+      renderMembers();
+      return problem;
     }
   }
 
@@ -875,12 +1662,50 @@
     els.backBtn.addEventListener("click", () => { document.body.dataset.view = "list"; });
     els.logoutBtn.addEventListener("click", logout);
     els.newChatBtn.addEventListener("click", openNewChat);
-    els.newChatForm.addEventListener("submit", submitNewChat);
-    for (const b of els.newChatDialog.querySelectorAll("[data-close]")) {
-      b.addEventListener("click", closePicker);
+    els.newChatForm.addEventListener("submit", submitPicker);
+    // Every dialog's Cancel/Close button just closes its own dialog; per-dialog "close"
+    // listeners below do the tidying up, so Esc and the button behave identically.
+    for (const b of document.querySelectorAll("dialog [data-close]")) {
+      b.addEventListener("click", () => {
+        const d = b.closest("dialog");
+        if (d && d.open) d.close();
+      });
     }
-    // Esc closes the dialog natively; make sure the in-flight search dies with it.
-    els.newChatDialog.addEventListener("close", cancelSearch);
+    // Esc closes the dialog natively; make sure the in-flight search dies with it and the
+    // picker falls back to its default flow.
+    els.newChatDialog.addEventListener("close", () => {
+      cancelSearch();
+      picker.mode = "new";
+      picker.chatId = null;
+    });
+
+    els.chatMenuBtn.addEventListener("click", toggleChatMenu);
+    els.chatMenuList.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { ev.preventDefault(); closeChatMenu(true); }
+      else if (ev.key === "ArrowDown") { ev.preventDefault(); moveMenu(1); }
+      else if (ev.key === "ArrowUp") { ev.preventDefault(); moveMenu(-1); }
+    });
+    // A click anywhere else dismisses the menu (the trigger handles its own toggle).
+    document.addEventListener("click", (ev) => {
+      if (!els.chatMenu.contains(ev.target)) closeChatMenu();
+    });
+    els.menuMembers.addEventListener("click", () => { closeChatMenu(); openMembers(); });
+    els.menuAddPeople.addEventListener("click", () => { closeChatMenu(); openAddPeople(); });
+    els.menuLeave.addEventListener("click", () => { closeChatMenu(); askLeave(); });
+    els.menuDelete.addEventListener("click", () => { closeChatMenu(); askDelete(); });
+
+    // Both panel actions open a second dialog on top of this one, which stays put.
+    els.membersAdd.addEventListener("click", () => openAddPeople(findChat(memberPanel.chatId)));
+    els.membersLeave.addEventListener("click", () => askLeave(findChat(memberPanel.chatId)));
+    els.membersDialog.addEventListener("close", () => { memberPanel.chatId = null; memberPanel.busy = null; });
+    els.confirmForm.addEventListener("submit", submitConfirm);
+    els.confirmDialog.addEventListener("close", () => {
+      confirmer.onOk = null;
+      confirmer.busy = false;
+      // The control we came from may have been deleted along with the chat; park focus
+      // somewhere real rather than letting it fall back to <body>.
+      if (!state.activeChatId && !els.membersDialog.open) els.newChatBtn.focus();
+    });
 
     els.pickerInput.addEventListener("input", onPickerInput);
     els.pickerInput.addEventListener("keydown", (ev) => {
@@ -939,6 +1764,7 @@
   /* ---------- boot ---------- */
   async function boot() {
     document.body.dataset.view = "list";
+    state.hiddenDms = loadHiddenDms();
     try {
       state.me = await API.getMe();
     } catch (e) {
@@ -954,6 +1780,11 @@
     try {
       const res = await API.getChats();
       state.chats = Array.isArray(res.data) ? res.data : [];
+      // A hidden DM that has moved on since it was hidden comes straight back.
+      for (const id of Object.keys(state.hiddenDms)) {
+        const c = state.chats.find((x) => x.chat_id === id);
+        if (!c || newsSinceHidden(c)) unhideDm(id);
+      }
       sortChats();
     } catch (e) {
       if (e.redirected) return;
@@ -964,7 +1795,8 @@
     updateConnBanner();
     WS.connect();
 
-    if (state.chats.length && DESKTOP.matches) selectChat(state.chats[0].chat_id);
+    const first = visibleChats()[0];
+    if (first && DESKTOP.matches) selectChat(first.chat_id);
   }
 
   boot();

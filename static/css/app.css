@@ -164,6 +164,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .avatar-sm { width: 32px; height: 32px; border-radius: 10px; font-size: 12px; }
 .avatar-xs { width: 20px; height: 20px; border-radius: 7px; font-size: 9px; }
+.avatar-lg { width: 46px; height: 46px; border-radius: 15px; font-size: 16px; }
 
 .icon-btn {
   display: inline-flex;
@@ -387,6 +388,38 @@ button, input, textarea { font: inherit; color: inherit; }
   font-weight: 600;
 }
 
+/* conversation menu: trigger pinned to the right of the header, panel below it */
+.chat-menu { position: relative; margin-left: auto; flex-shrink: 0; }
+.menu {
+  position: absolute;
+  z-index: 7;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lift);
+  animation: dialogIn 150ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.menu-item:hover { background: var(--row-hover); }
+.menu-item.danger { color: var(--error); }
+
 .conn-banner {
   position: absolute;
   z-index: 6;
@@ -535,6 +568,45 @@ button, input, textarea { font: inherit; color: inherit; }
   .meta.aside { display: none; }               /* no hover to reveal it on touch */
 }
 
+/* ---------- membership / role events ----------
+ * Deliberately not a bubble: no avatar, no side, no accent -- a quiet centred line with a
+ * hairline running out to both edges of the conversation column, so an event reads as
+ * something that happened *to* the chat rather than something someone said. Everything is
+ * --ink-soft / --line, the same pair .meta and .day already use, so it follows the theme
+ * into dark mode without a rule of its own.
+ */
+.sys {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: var(--col-w);
+  margin: 18px auto 12px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.sys::before, .sys::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--line);
+}
+.sys-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46ch;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.sys-time { white-space: nowrap; }
+.sys-time::before { content: "\00b7"; margin: 0 5px; }
+.sys.enter { animation: msgIn 140ms cubic-bezier(0.2, 0.8, 0.3, 1); }
+/* No day divider above it and nothing before it -> it is the top of the pane. */
+.sys:first-child, .messages-note + .sys, .day + .sys { margin-top: 2px; }
+/* The event already separates the two runs; don't stack its margin with the bubble's. */
+.sys + .msg.group-start { margin-top: 0; }
+
 /* ---------- composer ---------- */
 .composer {
   position: absolute;
@@ -663,6 +735,7 @@ button, input, textarea { font: inherit; color: inherit; }
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-haze);
 }
+.dialog-copy { margin: 0; font-size: 14px; line-height: 1.5; color: var(--ink-soft); }
 .form-error { min-height: 0; font-size: 13px; color: var(--error); }
 .form-error:empty { display: none; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
@@ -680,6 +753,14 @@ button, input, textarea { font: inherit; color: inherit; }
 .btn.primary:hover:not(:disabled) { background: var(--accent-strong); }
 .btn.ghost { background: transparent; color: var(--ink-soft); }
 .btn.ghost:hover { background: var(--row-hover); color: var(--ink); }
+.btn.danger { background: var(--error); color: var(--accent-ink); }
+.btn.danger:hover:not(:disabled) { filter: brightness(0.93); }
+/* quiet: a text button for an action that matters to you but destroys nothing for
+ * anyone else (leaving a group), so it must not read like .btn.danger. */
+.btn.quiet { background: transparent; color: var(--ink-soft); }
+.btn.quiet:hover:not(:disabled) { background: var(--row-hover); color: var(--ink); }
+.btn.quiet.caution:hover:not(:disabled) { color: var(--error); }
+.btn.small { padding: 6px 11px; border-radius: 10px; font-size: 13px; }
 .btn:active:not(:disabled) { transform: scale(0.97); }
 .btn:disabled { opacity: 0.45; cursor: default; }
 
@@ -766,6 +847,129 @@ button, input, textarea { font: inherit; color: inherit; }
 .picker-status { margin: 0; font-size: 13px; color: var(--ink-soft); }
 .picker-status:empty { display: none; }
 
+/* ---------- group details panel (#membersDialog) ----------
+ * Wider than the plain dialogs, because it is a roster rather than a sentence, and laid
+ * out as head / note / roster / actions. Roster rows are grouped by role, so a row never
+ * repeats its own role: the section heading carries it.
+ */
+.dialog.panel { width: min(94vw, 468px); }
+.dialog.panel form { gap: 14px; }
+
+.panel-head { display: flex; align-items: center; gap: 13px; }
+.panel-face { display: inline-flex; flex-shrink: 0; }
+.panel-head-text { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.panel-head h2 {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.panel-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* one quiet inset line about what you can do here, instead of a tag on every row */
+.panel-note {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: var(--row-hover);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+.panel-note:empty { display: none; }
+
+.roster {
+  max-height: min(46vh, 358px);
+  margin: 0 -4px;
+  padding: 0 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.roster-group + .roster-group { margin-top: 16px; }
+.roster-cap {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 6px;
+  padding: 0 4px 5px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.roster-count { font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.roster-list { margin: 0; padding: 0; list-style: none; }
+.roster-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 4px;
+  border-radius: 12px;
+  transition: background 140ms ease, opacity 140ms ease;
+}
+.roster-row:hover { background: var(--row-hover); }
+.roster-row.saving { opacity: 0.55; }
+.roster-main { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; }
+.roster-name {
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.roster-you {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 600;
+}
+.roster-empty { margin: 0; font-size: 13px; color: var(--ink-soft); }
+
+/* Row actions are deliberately unequal: the additive one is an outlined chip you reach
+ * for, the significant one is borderless text that only turns red under the cursor. */
+.row-action {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease, transform 110ms ease;
+}
+.row-action:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+.row-action:active:not(:disabled) { transform: scale(0.97); }
+.row-action:disabled { opacity: 0.45; cursor: default; }
+.row-action.caution { border-color: transparent; }
+.row-action.caution:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--row-hover);
+  color: var(--error);
+}
+
+/* Footer: Leave sits apart on the left, Close + Add people on the right. */
+.panel-actions { flex-wrap: wrap; align-items: center; justify-content: flex-start; }
+.actions-spacer { flex: 1 1 auto; }
+
 /* ---------- motion ---------- */
 @keyframes msgIn    { from { opacity: 0; transform: translateY(4px); } }
 @keyframes bannerIn { from { opacity: 0; transform: translate(-50%, -8px); } }
@@ -792,6 +996,15 @@ button, input, textarea { font: inherit; color: inherit; }
   .chat-head { padding: 0 16px; gap: 10px; }
   .messages { padding-left: 14px; padding-right: 14px; }
   .msg-col { max-width: 80%; }
+  .sys { gap: 9px; }
+  .sys-text { max-width: none; }               /* the column is already narrow enough */
   .composer { padding-left: 12px; padding-right: 12px; }
   .stage-art svg { width: 124px; height: 93px; }
+}
+
+/* The group panel's three footer buttons don't fit one narrow row. */
+@media (max-width: 480px) {
+  .panel-actions { flex-direction: column-reverse; align-items: stretch; }
+  .panel-actions .actions-spacer { display: none; }
+  .panel-actions .btn { width: 100%; }
 }

@@ -44,8 +44,9 @@ class WebsocketManager:
     async def connect(self,client_id:int,websocket:WebSocket,chat_ids:List[str]):
         if client_id in self.active_connections:
             return None
-        for i in chat_ids:
-            chat_id = i[0]
+        for chat_id in chat_ids:
+            # get_chats() returns a flat list of chat_id strings; indexing [0] here used
+            # to unwrap aiomysql's 1-tuples and silently registered the first character.
             if self.chats.get(chat_id) is None:
                 self.chats[chat_id] = [(client_id,websocket)]
             else:
@@ -91,23 +92,66 @@ class WebsocketManager:
             await connection.set_delivery_status([message_id],receiver_id)
 
     async def _handle_control(self,content:dict):
-        if content["type"] != "create_channel":
+        control_frame_list = ["create_channel","delete_channel","add_member","remove_member"]
+        if content["type"] not in control_frame_list:
             logger.warning(f"unknown control frame: {content}")
             return
         chat_id = content["chat_id"]
-        notify = json.dumps({"type":"chat_created","chat_id":chat_id})
-        for user_id in content["user_ids"]:
+        if content["type"] == "create_channel":
+            notify = json.dumps({"type":"chat_created","chat_id":chat_id})
+            for user_id in content["user_ids"]:
+                websocket = self.active_connections.get(user_id)
+                if websocket is None:
+                    continue                              # not connected to this worker
+                members = self.chats.setdefault(chat_id,[])
+                entry = (user_id,websocket)
+                if entry not in members:                  # connect() may already have registered it
+                    members.append(entry)
+                try:
+                    await websocket.send_text(notify)     # tell the client to refetch /chats
+                except Exception:
+                    continue
+
+        elif content["type"] == "delete_channel":
+            notify = json.dumps({"type":"chat_deleted","chat_id":chat_id})
+            chat = self.chats.pop(chat_id,None) or []   # None when no socket here is registered
+            for user_id,websocket in chat:
+                try:
+                    await websocket.send_text(notify)     # tell the client to refetch /chats
+                except Exception:
+                    continue
+        
+        elif content["type"] == "add_member":
+            notify = json.dumps({"type":"member_added","chat_id":chat_id,"user_id":content["user_id"]})
+            user_id = content["user_id"]
             websocket = self.active_connections.get(user_id)
             if websocket is None:
-                continue                              # not connected to this worker
+                return                                  # not connected to this worker
             members = self.chats.setdefault(chat_id,[])
             entry = (user_id,websocket)
-            if entry not in members:                  # connect() may already have registered it
+            if entry not in members:                      # `if members:` skipped the first one
                 members.append(entry)
             try:
-                await websocket.send_text(notify)     # tell the client to refetch /chats
+                await websocket.send_text(notify)         # tell the client to refetch /chats
             except Exception:
-                continue
+                return
+
+        elif content["type"] == "remove_member":
+            notify = json.dumps({"type":"member_removed","chat_id":chat_id,"user_id":content["user_id"]})
+            user_id = content["user_id"]
+            websocket = self.active_connections.get(user_id)
+            if websocket is None:
+                return                                  # not connected to this worker
+            # Deregister if we hold it, but notify either way: .remove() on a missing
+            # entry raises ValueError, which pubsub_reader swallows, losing the frame.
+            members = self.chats.get(chat_id)
+            entry = (user_id,websocket)
+            if members and entry in members:
+                members.remove(entry)
+            try:
+                await websocket.send_text(notify)         # tell the client to refetch /chats
+            except Exception:
+                return
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)

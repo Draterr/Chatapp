@@ -1,6 +1,3 @@
-CREATE DATABASE chatapp;
-
-USE chatapp;
 CREATE Table users (
   user_id int AUTO_INCREMENT,
   username varchar(255) NOT NULL UNIQUE,

@@ -3,13 +3,26 @@
  * The socket is NOT proxied by nginx; it connects straight to the backend port.
  * Auth is the httpOnly session cookie, sent automatically on the handshake.
  *
- * Inbound frames (see FRONTEND_SPEC.md §5):
- *   { type: "message", ... }            -> "message"
- *   { type: "ack", content, timestamp } -> "ack"
- *   { type: "error", code, detail }     -> "error"
- *   { type: "chat_created", chat_id }   -> "chat_created"
- *   { [chat_id]: [frames...] }          -> "pending"  (no top-level type)
+ * Inbound frames (nine shapes; see FRONTEND_SPEC.md §5):
+ *   { type: "message", ... }                     -> "message"
+ *   { type: "system", event, actor_*, target_* }  -> "system"
+ *   { type: "ack", content, timestamp }          -> "ack"
+ *   { type: "error", code, detail }               -> "error"
+ *   { type: "chat_created", chat_id }             -> "chat_created"
+ *   { type: "chat_deleted", chat_id }             -> "chat_deleted"
+ *   { type: "member_added", chat_id, user_id }    -> "member_added"
+ *   { type: "member_removed", chat_id, user_id }  -> "member_removed"
+ *   { [chat_id]: [frames...] }                   -> "pending"  (no top-level type)
  * Plus a synthetic "status" event: "connecting" | "open" | "closed".
+ *
+ * A "system" frame is a membership/role event (member_added / member_left / promoted /
+ * demoted) recorded in the chat's timeline. It travels the chat's own pubsub channel like
+ * a message and comes back from history in exactly the same shape, so app.js renders the
+ * live copy and the historical one through one renderer.
+ *
+ * The two membership frames are sent ONLY to the user they are about -- the rest of the
+ * chat is never told -- so "member_added" means *you* were added and "member_removed"
+ * means *you* are out. app.js explains what that costs.
  */
 window.WS = (() => {
   "use strict";
@@ -46,9 +59,13 @@ window.WS = (() => {
     if (!data || typeof data !== "object") return;
     switch (data.type) {
       case "message": emit("message", data); break;
+      case "system":  emit("system", data); break;
       case "ack":     emit("ack", data); break;
       case "error":   emit("error", data); break;
       case "chat_created": emit("chat_created", data); break;
+      case "chat_deleted": emit("chat_deleted", data); break;
+      case "member_added":   emit("member_added", data); break;
+      case "member_removed": emit("member_removed", data); break;
       default:
         // Pending-messages map: keyed by chat_id, no top-level "type".
         if (data.type === undefined) emit("pending", data);
