@@ -115,7 +115,8 @@ class WebsocketManager:
     
     async def notify_status(self,error_message:ErrorResponse,sender_id:int):
         sender_websocket = self.active_connections.get(sender_id)
-        await sender_websocket.send_json(error_message,mode="text")
+        if sender_websocket:
+            await sender_websocket.send_json(error_message,mode="text")
 
     async def disconnect(self,client_id:int,websocket):
         self.active_connections.pop(client_id,None)

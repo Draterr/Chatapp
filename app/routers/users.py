@@ -1,3 +1,4 @@
+from aiomysql.cursors import re
 from fastapi import APIRouter, Response,Depends,HTTPException,Cookie
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import RedirectResponse
@@ -55,6 +56,9 @@ def set_auth_cookies(response, access_jwt, access_expire, refresh_raw, refresh_e
     response.set_cookie(key="refresh_token",value=refresh_raw,httponly=True,secure=True,expires=refresh_expire,path="/api/refresh")
 
 def verify_jwt(session:Annotated[str|None, Cookie()] = None):
+    #no session cookie
+    if not session:
+        return None
     try:
         cookie_val = decode(session,JWT_SECRET_KEY,algorithms=["HS256"])
     except Exception as e:
@@ -118,6 +122,7 @@ async def refresh_token(refresh_token: Annotated[str|None, Cookie()], response: 
     raw,new_hash,created_at,expires_at = generate_refresh_token()
     await connection.refresh_refresh_token(user_id=uid,old_token_hash=old_hash,new_refresh_token=new_hash,expires_at=expires_at.isoformat(),created_at=created_at.isoformat())
     set_auth_cookies(response,access_jwt,access_expire,raw,expires_at)
+    return "Successfully refreshed!"
 
 @router.get("/users",tags=["users"])
 async def search_user_by_name(session: Annotated[dict|None, Depends(verify_jwt)],q: str,limit: int=10):

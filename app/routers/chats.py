@@ -17,10 +17,11 @@ class CHAT(BaseModel):
 
 @chats.post("/create_chat",tags=["chats"])
 async def create_chat(chat: CHAT, session: Annotated[dict|None, Depends(verify_jwt)]):
-    if chat.is_dm and len(chat.chat_users) > 1:
-        raise HTTPException(status_code=400,detail="Direct messages can only have one user!")
     if session is None:
         raise HTTPException(status_code=403,detail="Unauthorized")
+    if chat.is_dm:
+        dm_key = (min(chat.chat_users),max(chat.chat_users))
+    dm_key = sorted(dm_key)
     chat_id = uuid4()
     user_id = session["user_id"]
     if user_id not in chat.chat_users:
