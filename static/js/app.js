@@ -102,13 +102,13 @@
   }
 
   /* ---------- derived data (spec §6) ---------- */
-  // The hue is the spec's hash (so a person keeps their colour); saturation and
-  // lightness are pulled back and themed so the circles sit inside the warm
-  // palette instead of fighting it.
+  // The hue is the spec's hash (so a person keeps their colour). Only the hue is
+  // handed to CSS as --h; app.css turns it into a pastel tile with deeper initials,
+  // themed per colour scheme.
   function hueFor(id) {
     let h = 0;
     for (const c of String(id)) h = c.charCodeAt(0) + ((h << 5) - h);
-    return `hsl(${((h % 360) + 360) % 360} var(--avatar-sat, 34%) var(--avatar-lum, 47%))`;
+    return ((h % 360) + 360) % 360;
   }
 
   function initials(name) {
@@ -123,7 +123,7 @@
   function avatarEl(name, seed, url, extraClass) {
     const node = el("span", {
       class: "avatar" + (extraClass ? " " + extraClass : ""),
-      style: `--avatar-hue:${hueFor(seed)}`,
+      style: `--h:${hueFor(seed)}`,
       "aria-hidden": "true",
     }, initials(name));
     if (url) {
@@ -448,8 +448,8 @@
     if (!chats.length) {
       const stage = el("div", { class: "stage" },
         el("div", { class: "stage-art" }),
-        el("h2", { class: "stage-title" }, "Nothing here yet"),
-        el("p", { class: "stage-copy" }, "Start a conversation and it'll live in this list."),
+        el("h2", { class: "stage-title" }, "No conversations"),
+        el("p", { class: "stage-copy" }, "Your conversations will appear here."),
         el("button", { type: "button", class: "btn primary", onclick: openNewChat }, "New conversation"));
       const a = art("artNoChats");
       if (a) stage.firstChild.append(a);
@@ -573,8 +573,8 @@
       const who = chat ? chatTitle(chat) : "them";
       const stage = el("div", { class: "stage" },
         el("div", { class: "stage-art" }),
-        el("h2", { class: "stage-title" }, "Say hi to " + who),
-        el("p", { class: "stage-copy" }, "This is the very beginning. Write the first message below."));
+        el("h2", { class: "stage-title" }, "Start of your conversation with " + who),
+        el("p", { class: "stage-copy" }, "No messages yet. Send the first one below."));
       const a = art("artSayHi");
       if (a) stage.firstChild.append(a);
       box.append(stage);

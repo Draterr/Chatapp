@@ -258,15 +258,20 @@ Plain HTML/CSS/JS, no build step or framework; nginx bind-mounts the directory s
 Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-mapping rules; the
 "v2 changes" note at the top of that file lists where the shipped UI has moved past it.
 
-- `index.html` + `css/app.css` — two-pane "warm editorial" shell (sidebar + chat + composer).
+- `index.html` + `css/app.css` — two-pane shell (sidebar + chat + composer): a neutral grey ramp
+  (`--ink`/`--ink-soft`/`--ink-faint`, `--subtle`, `--line`), one blue `--accent` with a near
+  shade `--accent-2` used only for subtle gradient ends (logo, sent bubbles, send button,
+  badge), Inter for UI and Bricolage Grotesque (`--display`) for the wordmark, chat title, dialog
+  and empty-state headings. The speech-bubble corner (one tight radius bottom-left) recurs on the
+  logo mark, empty-state tile and login mark. Avatars are pastel tiles: `hueFor()` in `app.js`
+  returns only a hue, set as `--h`, and the `--avatar-bg-*`/`--avatar-fg-*` tokens theme it.
   All colour is tokens on `:root` with the dark theme redefining the same tokens in one
   `prefers-color-scheme` block; `body[data-view]` toggles the single-pane mobile layout.
-  Inter (UI) and Fraunces (display: wordmark, chat title, dialog and empty-state headlines) load
-  from Google Fonts with real fallback stacks. The chat header is a `backdrop-filter` strip the
-  messages scroll under and the composer floats over them, so `.messages` reserves
-  `--head-h` at the top and `--composer-h` (kept current by a `ResizeObserver`) at the bottom.
+  The chat header and the composer are solid bars absolutely positioned over the message list,
+  so `.messages` reserves `--head-h` at the top and `--composer-h` (kept current by a
+  `ResizeObserver`) at the bottom.
   `.app` needs `grid-template-rows: minmax(0,1fr)` and `min-height: 0` on both panes or the inner
-  scroll containers stop scrolling. Two `<template>` elements hold the empty-state SVGs, because
+  scroll containers stop scrolling. Two `<template>` elements hold the empty-state line icons, because
   the `el()` helper uses `createElement` and can't build namespaced SVG. `.sys` (membership/role
   event lines) is a hairline-flanked centred row using only `--ink-soft` / `--line`, the same pair
   `.meta` and `.day` already use, so it needs no dark-mode rule of its own.
@@ -369,7 +374,7 @@ Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-map
   people" on the right; "Add people" is hidden for non-admins). The roster is **grouped by role**
   (`Admins` / `Members` sections with a count), so no row repeats its own role badge — that per-row
   uppercase pill is what made the old flat list noisy. Row actions are deliberately unequal:
-  "Make admin" is an outlined `.row-action` chip, while "Demote"/"Step down" is `.row-action.caution`
+  "Make admin" is an outlined `.row-action` button, while "Demote"/"Step down" is `.row-action.caution`
   — borderless text that only turns `--error` under the cursor — so the significant action no longer
   reads like the benign one. Opening it focuses "Add people" (or "Close" for a non-admin) rather than
   letting `<dialog>` pick the Leave button. "Step down" and "Leave group" open `#confirmDialog` on top
