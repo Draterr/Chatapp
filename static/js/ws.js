@@ -84,7 +84,7 @@ window.WS = (() => {
       try {
         await window.API.getMe();
       } catch (e) {
-        if (e && e.status === 403) return; // redirected to login
+        if (e && e.status === 401) return; // redirected to login
         // Server unreachable: still try to connect; failure re-schedules with a longer backoff.
       }
       connect();

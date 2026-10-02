@@ -274,7 +274,7 @@ async def send_message(username:str,client_id:str,websocket:WebSocket):
 @wsroute.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, Depends(verify_jwt)]):
     if not session:
-        raise HTTPException(status_code=403,detail="Unauthorized")
+        raise HTTPException(status_code=401,detail="Unauthorized")
 
     await websocket.accept()
     client_id = session["user_id"]

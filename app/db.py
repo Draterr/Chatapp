@@ -94,7 +94,7 @@ class Database:
         if stored_password and bcrypt.verify(password,stored_password[0]):
             return (stored_password[1],stored_password[2])
         else:
-            raise HTTPException(status_code=403,detail="Incorrect username or password")
+            raise HTTPException(status_code=401,detail="Incorrect username or password")
 
     async def insert_user(self,username:str,password:str,role:str,display_name:str):
         query = "INSERT INTO users(username,password,role,display_name) VALUES(%s,%s,%s,%s)"
@@ -297,7 +297,7 @@ class Database:
             await cur.execute("SELECT user_id FROM refresh_tokens WHERE token_hash=%s AND revoked=False AND expires_at >= NOW()",(token_hash,))
             out = await cur.fetchone()
             if not out:
-                raise HTTPException(status_code=404,detail="A user with this refresh token is not found")
+                raise HTTPException(status_code=401,detail="Invalid or expired refresh token")
         return out[0]
     
     async def search_username(self,*,input: str,searcher_id: int,limit: int) -> dict:

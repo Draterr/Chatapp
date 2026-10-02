@@ -63,9 +63,18 @@ clients must hit the backend port directly.
 good for `ACCESS_TOKEN_EXPIRE_MINUTES` (600, i.e. 10h), plus an opaque refresh token in a second
 httpOnly cookie scoped to `path=/api/refresh` and good for 7 days. Only the sha256 of the refresh
 token is stored (`refresh_tokens`); the raw value never reaches the DB. `POST /refresh` rotates the
-pair and revokes the old hash. `verify_jwt` is a `Cookie()`-based dependency and returns `None` (not
-a 401) on failure — callers must check. The WebSocket endpoint takes it as a `Depends` and derives
-`client_id` from the session.
+pair and revokes the old hash. `verify_jwt` is a `Cookie()`-based dependency and returns `None` on
+failure — callers must check, and every one of them raises **401** `Unauthorized`. The WebSocket
+endpoint takes it as a `Depends` and derives `client_id` from the session.
+
+**401 vs 403 is load-bearing.** `401` means "we don't know who you are": no/invalid/expired session
+cookie, a wrong password at `POST /login`, and a missing, unknown, revoked or expired refresh token at
+`POST /refresh`. `403` means "we know who you are and the answer is no": not a member, not an admin,
+sole admin, can't leave/delete a DM. The frontend's refresh interceptor keys on `401` only, so a new
+endpoint that answers an auth failure with `403` won't trigger a refresh, and one that answers a
+permission failure with `401` will needlessly rotate the user's token pair and retry. The refresh
+endpoint's `refresh_token` cookie parameter needs its `= None` default; without it FastAPI rejects a
+missing cookie with `422` before the handler's own `401` can run.
 
 `GET /users?q=<prefix>&limit=` (`search_username`) prefix-matches `display_name`/`username`,
 excludes the caller, and clamps `limit` to 25. `%`, `_` and `\` in `q` are escaped before the `LIKE`.
@@ -117,13 +126,6 @@ leave — they have to promote someone else first, which is the one error here w
 `403 You are not a member of this chat!`, which is also what a second, duplicate leave returns. On
 success it publishes a `remove_member` control frame. There is no "remove someone else" endpoint, so
 `remove_member` only ever describes the caller leaving.
-
-Note: these business-logic `403`s collide with `API.apiFetch()`'s refresh interceptor, which treats
-*any* 403 as an expired access token: it runs one `POST /api/refresh` (rotating the token pair) and
-retries the request once before surfacing the error. The second attempt is refused the same way, so
-the detail the user sees is right — it just costs a wasted refresh and a duplicate request. This
-predates `add_member`/`leave` (`delete_chat` and `change_role` behave the same) and is not worth
-chasing until the backend uses 401 for auth.
 
 ### Messaging pipeline (`app/routers/websocket.py`)
 
@@ -275,8 +277,9 @@ Built to `FRONTEND_SPEC.md` — read that for the API/WS shapes and the data-map
   the `el()` helper uses `createElement` and can't build namespaced SVG. `.sys` (membership/role
   event lines) is a hairline-flanked centred row using only `--ink-soft` / `--line`, the same pair
   `.meta` and `.day` already use, so it needs no dark-mode rule of its own.
-- `js/api.js` — `API.apiFetch()` adds the `/api` prefix and `credentials: "include"`; a 403
-  triggers one single-flight `POST /api/refresh` and a retry, else redirects to `/login/`.
+- `js/api.js` — `API.apiFetch()` adds the `/api` prefix and `credentials: "include"`; a **401**
+  triggers one single-flight `POST /api/refresh` and a retry, else redirects to `/login/`. A 403 is a
+  permission answer and passes straight through to the caller (see "401 vs 403" under Auth).
   `API.searchUsers(q, { limit, signal })` wraps `GET /api/users?q=`. The membership calls each match
   their endpoint's own shape, and the asymmetries are the backend's, not bugs to fix:
   `deleteChat(chatId)` posts a JSON body, `changeRole(chatId, userId, newRole)` posts **query

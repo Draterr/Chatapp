@@ -97,7 +97,7 @@ async def login(user: Annotated[User, Depends(user_validation)],response: Respon
 @router.post("/logout",tags=["users"])
 async def logout(session: Annotated[dict|None, Depends(verify_jwt)],response: Response):
     if not session:
-        raise HTTPException(status_code=403,detail="Unauthorized")
+        raise HTTPException(status_code=401,detail="Unauthorized")
     user_id = session["user_id"]
     await connection.revoke_refresh_token(user_id)
     response.delete_cookie(key="session")
@@ -107,14 +107,14 @@ async def logout(session: Annotated[dict|None, Depends(verify_jwt)],response: Re
 @router.get("/me",tags=["users"])
 async def current_user(session: Annotated[dict|None, Depends(verify_jwt)]):
     if not session:
-        raise HTTPException(status_code=403,detail="Unauthorized")
+        raise HTTPException(status_code=401,detail="Unauthorized")
     profile = await connection.get_user_profile(session["user_id"])
     return {"user_id":session["user_id"],"user":session["user"],**profile}
 
 @router.post("/refresh",tags=["users"])
-async def refresh_token(refresh_token: Annotated[str|None, Cookie()], response: Response):
+async def refresh_token(response: Response, refresh_token: Annotated[str|None, Cookie()] = None):
     if not refresh_token:
-        raise HTTPException(status_code=403,detail="Unauthorized")
+        raise HTTPException(status_code=401,detail="Unauthorized")
     old_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     uid = await connection.get_user_id_with_refresh(token_hash=old_hash)
     _,username,_,role,_,_ = await connection.get_user_info(user_id=uid)
@@ -127,7 +127,7 @@ async def refresh_token(refresh_token: Annotated[str|None, Cookie()], response: 
 @router.get("/users",tags=["users"])
 async def search_user_by_name(session: Annotated[dict|None, Depends(verify_jwt)],q: str,limit: int=10):
     if not session:
-        raise HTTPException(status_code=403,detail="Unauthorized")
+        raise HTTPException(status_code=401,detail="Unauthorized")
     uid = session["user_id"]
     q = q.strip()
     q = q.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")

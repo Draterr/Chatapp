@@ -64,7 +64,7 @@
 
       const res = await post("/login", { username, password });
       if (res.ok) { location.replace("/"); return; }
-      if (res.status === 403) { error.textContent = "Incorrect username or password."; return; }
+      if (res.status === 401) { error.textContent = "Incorrect username or password."; return; }
       if (res.status === 400) { error.textContent = await detailOf(res, "Invalid username or password."); return; }
       error.textContent = "Something went wrong. Please try again.";
     } catch (_) {

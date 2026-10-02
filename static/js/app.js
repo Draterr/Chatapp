@@ -1768,7 +1768,7 @@
     try {
       state.me = await API.getMe();
     } catch (e) {
-      if (e.status === 403) { API.toLogin(); return; }
+      if (e.status === 401) { API.toLogin(); return; }
       toast("Can't reach the server. Retrying…");
       setTimeout(boot, 3000);
       return;

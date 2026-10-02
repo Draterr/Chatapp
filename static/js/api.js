@@ -1,9 +1,10 @@
 /* api.js — REST helpers + single-flight access-token refresh.
  *
  * Every call goes through apiFetch(): "/api" prefix, credentials: "include".
- * A 403 means the access token is invalid/expired; we POST /api/refresh once
- * (shared across concurrent callers), retry the request, and send the user to
- * /login/ if the refresh itself fails.
+ * A 401 means the access token is missing/invalid/expired; we POST /api/refresh
+ * once (shared across concurrent callers), retry the request, and send the user
+ * to /login/ if the refresh itself fails. A 403 is a permission answer ("not an
+ * admin", "only admin") and is passed straight through -- refreshing can't fix it.
  */
 window.API = (() => {
   "use strict";
@@ -30,12 +31,12 @@ window.API = (() => {
   async function apiFetch(path, opts = {}) {
     const init = { ...opts, credentials: "include" };
     const res = await fetch("/api" + path, init);
-    if (res.status !== 403) return res;
+    if (res.status !== 401) return res;
     const ok = await refreshOnce();
     if (!ok) {
       toLogin();
       const err = new Error("Session expired");
-      err.status = 403;
+      err.status = 401;
       err.redirected = true;
       throw err;
     }
