@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from passlib.hash import bcrypt
 import uuid
+import json
 from datetime import datetime,timezone
+
 
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
@@ -30,24 +32,47 @@ def iso_utc(dt):
 # Known system events. `text` is a server-rendered fallback so a client that doesn't
 # know an event can still show something; clients that do know it build their own copy
 # from actor_name/target_name, which stays correct if a display name later changes.
-SYSTEM_EVENTS = ("member_added","member_left","promoted","demoted")
+SYSTEM_EVENTS = ("member_added","member_left","member_kicked","promoted","demoted","chat_renamed","edit_message")
 
-def system_text(event,actor_name,target_name):
-    """The server-rendered fallback wording, stored in `content`."""
+def system_text(event,actor_name,target_name,data=None):
+    """The server-rendered fallback wording, stored in `content`.
+
+    `data` is the event's own payload for events that act on something other than a
+    person -- a rename has no target user, it has a name.
+    """
+    data = data or {}
+    if event == "chat_renamed":
+        return f"{actor_name} renamed the group to \u201c{data.get('new_name','')}\u201d"
     if event == "member_added":
         return f"{actor_name} added {target_name}"
     if event == "member_left":
         return f"{actor_name} left"
     if event == "promoted":
         return f"{actor_name} made {target_name} an admin"
+    if event == "member_kicked":
+        return f"{actor_name} kicked {target_name}"
     return f"{actor_name} removed {target_name} as an admin"
 
-def system_frame(message_id,chat_id,event,actor_id,actor_name,target_id,target_name,text,time_sent):
+def system_frame(message_id,chat_id,event,actor_id,actor_name,target_id,target_name,text,time_sent,data=None):
     """The single definition of a system message's wire shape -- live and from history."""
     return {"type":"system","message_id":message_id,"chat_id":chat_id,"event":event,
             "actor_id":actor_id,"actor_name":actor_name,
             "target_id":target_id,"target_name":target_name,
+            "data":data or {},
             "message":text,"time_sent":time_sent}
+
+def load_event_data(raw):
+    """messages.event_data comes back as a JSON string (or already-decoded) from aiomysql."""
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw,(dict,list)):
+        return raw
+    try:
+        out = json.loads(raw)
+    except Exception:
+        logger.warning(f"unparsable event_data: {raw!r}")
+        return {}
+    return out if isinstance(out,dict) else {}
 
 class Database:
     def __init__(self,user: str|None,password:str|None,database:str|None,host:str|None):
@@ -142,7 +167,7 @@ class Database:
             await cur.executemany(insert_message_status,data)
         return message_id
 
-    async def insert_system_message(self,*,chat_id:str,actor_id:int,event:str,target_id:int) -> dict:
+    async def insert_system_message(self,*,chat_id:str,actor_id:int,event:str,target_id:int|None=None,data:dict|None=None) -> dict:
         """Record a membership/role event as a system message and return its frame.
 
         No message_status rows are written on purpose: an event should never drive an
@@ -154,19 +179,24 @@ class Database:
             raise ValueError(f"unknown system event {event!r}")
         message_id = str(uuid.uuid4())
         time = datetime.now(timezone.utc)
-        names = "SELECT user_id,display_name FROM users WHERE user_id IN (%s,%s)"
-        insert = ("INSERT INTO messages(message_id,sent_by,time_sent,chat_id,content,kind,event,target_id) "
-                  "VALUES(%s,%s,%s,%s,%s,'system',%s,%s)")
+        # target_id is None for an event with no subject user (a rename), so the lookup
+        # is built from whichever ids are actually present -- a literal IN (%s,%s) with a
+        # None would quietly match nothing and lose the actor's name too.
+        ids = [i for i in (actor_id,target_id) if i is not None]
+        names = "SELECT user_id,display_name FROM users WHERE user_id IN (%s)" % ",".join(["%s"]*len(ids))
+        insert = ("INSERT INTO messages(message_id,sent_by,time_sent,chat_id,content,kind,event,target_id,event_data) "
+                  "VALUES(%s,%s,%s,%s,%s,'system',%s,%s,%s)")
         async with self._transaction() as cur:
-            await cur.execute(names,(actor_id,target_id))
+            await cur.execute(names,tuple(ids))
             found = dict(await cur.fetchall())
             actor_name = found.get(actor_id) or "Someone"
             target_name = found.get(target_id) or "someone"
-            text = system_text(event,actor_name,target_name)
+            text = system_text(event,actor_name,target_name,data)
             await cur.execute(insert,(message_id,actor_id,time.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                                      chat_id,text,event,target_id))
+                                      chat_id,text,event,target_id,
+                                      json.dumps(data) if data else None))
         return system_frame(message_id,chat_id,event,actor_id,found.get(actor_id),
-                            target_id,found.get(target_id),text,time.isoformat())
+                            target_id,found.get(target_id),text,time.isoformat(),data)
 
     async def insert_chat(self,chat_id:str,chat_name:str,chat_users:list[int],is_dm:bool=False,dm_key:str|None=None,current_user_id:int|None=None):
         insert_chat = "INSERT INTO chats(chat_id,chat_name,is_dm,dm_key) VALUES(%s,%s,%s,%s)"
@@ -212,7 +242,7 @@ class Database:
             # kind/event/target carried through so the sidebar can tell an event row from a
             # message on a cold boot, before any history is loaded.
             query_last_message = ("SELECT t.chat_id, t.message_id, t.sent_by, t.content, t.time_sent, "
-                                  "t.kind, t.event, t.target_id, a.display_name, g.display_name "
+                                  "t.kind, t.event, t.target_id, a.display_name, g.display_name, t.event_data "
                                   "FROM (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY time_sent DESC) rn "
                                   "FROM messages m WHERE m.chat_id IN (SELECT chat_id FROM chat_users WHERE user_id = %s)) t "
                                   "LEFT JOIN users a ON a.user_id = t.sent_by "
@@ -233,17 +263,18 @@ class Database:
                 res[chat_id]["members"].append({"user_id":user_id,"display_name":display_name,"avatar_url":avatar_url,"role":role})
             for chat_id,unread_count in unread_count:
                 res[chat_id]["unread_message_count"] = unread_count
-            for chat_id,message_id,sent_by,content,time_sent,kind,event,target_id,actor_name,target_name in last_message:
+            for chat_id,message_id,sent_by,content,time_sent,kind,event,target_id,actor_name,target_name,event_data in last_message:
                 if kind == "system":
                     res[chat_id]["last_message"] = system_frame(message_id,chat_id,event,sent_by,actor_name,
-                                                                target_id,target_name,content,iso_utc(time_sent))
+                                                                target_id,target_name,content,iso_utc(time_sent),
+                                                                load_event_data(event_data))
                 else:
                     res[chat_id]["last_message"] = {"message_id":message_id,"sender_id":sent_by,"message":content,"time_sent":iso_utc(time_sent)}
             return {"data":sorted(res.values(),key=lambda x:x["last_message"].get("time_sent") or "",reverse=True)}
     
     async def get_chat_message(self,chat_id: str, user_id:int, limit:int,offset:int) -> dict :
         query = ("SELECT m.message_id, m.sent_by, u.display_name, m.time_sent, m.chat_id, m.content, "
-                 "m.kind, m.event, m.target_id, t.display_name "
+                 "m.kind, m.event, m.target_id, t.display_name, m.event_data "
                  "FROM messages AS m "
                  "JOIN users AS u ON u.user_id = m.sent_by "
                  "LEFT JOIN users AS t ON t.user_id = m.target_id "
@@ -254,10 +285,11 @@ class Database:
             await cur.execute(query,(user_id,chat_id,limit,offset))
             out = await cur.fetchall()
         messages = []
-        for message_id,sender_id,sender_name,time_sent,cid,content,kind,event,target_id,target_name in out:
+        for message_id,sender_id,sender_name,time_sent,cid,content,kind,event,target_id,target_name,event_data in out:
             if kind == "system":
                 messages.append(system_frame(message_id,cid,event,sender_id,sender_name,
-                                             target_id,target_name,content,iso_utc(time_sent)))
+                                             target_id,target_name,content,iso_utc(time_sent),
+                                             load_event_data(event_data)))
             else:
                 messages.append({"type":"message","message_id":message_id,"sender_id":sender_id,
                                  "sender_name":sender_name,"message":content,
@@ -325,6 +357,17 @@ class Database:
                 raise HTTPException(status_code=500,detail="Failed to delete chat")
         return True
 
+    async def rename_chat(self,*,chat_id: str,new_name: str) -> bool:
+        # rowcount is 0 both for "no such chat" and for "renamed to the name it already
+        # had", so existence is checked separately instead of inferred from it.
+        exists_query = "SELECT 1 FROM chats WHERE chat_id = %s"
+        update_query = "UPDATE chats SET chat_name = %s WHERE chat_id = %s"
+        async with self._transaction() as cur:
+            await cur.execute(exists_query,(chat_id,))
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404,detail="Chat not found")
+            await cur.execute(update_query,(new_name,chat_id))
+        return True
         
 
     async def check_user_role(self,*,chat_id:str, user_id: int) -> str:
@@ -377,5 +420,35 @@ class Database:
                     await cur.execute(insert_query,(chat_id,user_id,"user"))
                 except aiomysql.IntegrityError:
                     raise HTTPException(status_code=409,detail=f"user {user_id} already exists in this chat")
+
+    async def change_password(self,*,user_id:int,new_password: str) -> None:
+        update_query = "UPDATE users SET password = %s WHERE user_id = %s"
+        hashed_password = bcrypt.using(rounds=12).hash(new_password)
+        async with self._transaction() as cur:
+            try:
+                await cur.execute(update_query,(hashed_password,user_id)) 
+            except Exception:
+                raise HTTPException(status_code=500,detail="Something Went Wrong")
+
+    # async def check_message_ownership(self,*,message_id:str) -> int:
+    #     find_query = "SELECT user_id FROM messages WHERE message_id = %s"
+    #     async with self._transaction() as cur:
+    #         try:
+    #             await cur.execute(find_query,(message_id,)) 
+    #             out = cur.fetchone()
+    #             return out[0]
+    #         except Exception:
+    #             raise HTTPException(status_code=500,detail="Something Went Wrong")
+    #
+    # async def edit_message(self,*,message_id:str,new_content:str) -> None:
+    #     update_content = "UPDATE messages SET content = %s WHERE message_id = %s"
+    #     update_status = "UPDATE message_status SET status = 'NOT-DELIVERED' WHERE message_id = %s"
+    #     async with self._transaction() as cur:
+    #         try:
+    #             await cur.execute(update_content,(message_id,new_content)) 
+    #             await cur.execute(update_status,(message_id,)) 
+    #         except Exception:
+    #             raise HTTPException(status_code=500,detail="Something Went Wrong")
+
 
 connection = Database(user,password,database,host)

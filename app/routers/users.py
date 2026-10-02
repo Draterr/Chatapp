@@ -1,7 +1,4 @@
-from aiomysql.cursors import re
 from fastapi import APIRouter, Response,Depends,HTTPException,Cookie
-from fastapi.encoders import jsonable_encoder
-from fastapi.responses import RedirectResponse
 from jwt import decode
 from pydantic import BaseModel
 from db import connection
@@ -11,6 +8,7 @@ from datetime import datetime,timedelta,timezone
 from typing import Annotated
 from loguru import logger
 from sys import exit
+from re import findall
 import secrets, hashlib
 
 router = APIRouter()
@@ -21,7 +19,7 @@ if JWT_SECRET_KEY is None:
     exit(1)
 
 ALGO = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 600 
+ACCESS_TOKEN_EXPIRE_MINUTES = 10 
 REFRESH_TOKEN_EXPIRE_MINUTES = 10080   # 7 days
 
 class User(BaseModel):
@@ -37,6 +35,11 @@ class User_Response(BaseModel):
     description: str
     time: datetime
 
+class PasswordChange(BaseModel):
+    old_password: str
+    new_password: str
+    confirm_new_password: str
+
 def create_access_token(data:dict):
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     data.update({"exp":expire})
@@ -50,6 +53,8 @@ def generate_refresh_token():
     created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(minutes=REFRESH_TOKEN_EXPIRE_MINUTES)
     return (raw, token_hash, created_at, expires_at)
+
+
 
 def set_auth_cookies(response, access_jwt, access_expire, refresh_raw, refresh_expire):
     response.set_cookie(key="session",value=access_jwt,httponly=True,secure=True,expires=access_expire)
@@ -122,7 +127,7 @@ async def refresh_token(response: Response, refresh_token: Annotated[str|None, C
     raw,new_hash,created_at,expires_at = generate_refresh_token()
     await connection.refresh_refresh_token(user_id=uid,old_token_hash=old_hash,new_refresh_token=new_hash,expires_at=expires_at.isoformat(),created_at=created_at.isoformat())
     set_auth_cookies(response,access_jwt,access_expire,raw,expires_at)
-    return "Successfully refreshed!"
+    return {"message":"Successfully refreshed!"}
 
 @router.get("/users",tags=["users"])
 async def search_user_by_name(session: Annotated[dict|None, Depends(verify_jwt)],q: str,limit: int=10):
@@ -133,4 +138,34 @@ async def search_user_by_name(session: Annotated[dict|None, Depends(verify_jwt)]
     q = q.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")
     limit = max(1,min(limit,25))
     return await connection.search_username(input=q,limit=limit,searcher_id=uid)
+
+# @router.post("/profile",tags=["users"])
+# async def update_profile(session: Annotated[dict|None, Depends(verify_jwt)],profile: Profile):
+#     if not session:
+#         raise HTTPException(status_code=401,detail="Unauthorized")
+#     uid = session["user_id"]
+#     display_name = profile.display_name.strip().replace("\\","\\\\").replace("%","\\%").replace("_","\\_")
+#     avatar_url = profile.avatar_url
+
+@router.post("/passwordchange",tags=["users"])
+async def change_password(session: Annotated[dict|None, Depends(verify_jwt)],passwords:PasswordChange,response:Response):
+    if not session:
+        raise HTTPException(status_code=401,detail="Unauthorized")
+    uid = session["user_id"]
+    new_pass = passwords.new_password
+    confirm_pass = passwords.confirm_new_password
+    if new_pass != confirm_pass:
+        raise HTTPException(status_code=403,detail="Password Missmatch")
+    rgx = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d])[^\s]{8,}$"
+    out = findall(rgx,new_pass)
+    if len(out) == 0:
+        raise HTTPException(status_code=403,detail="Password does not meet the requirement")
+    await connection.change_password(user_id=uid,new_password=new_pass)
+    await connection.revoke_refresh_token(user_id=uid)
+    _,username,_,role,_,_ = await connection.get_user_info(user_id=uid)
+    access_jwt,access_expire = create_access_token({"user":username,"role":role,"user_id":uid})
+    raw,new_hash,created_at,expires_at = generate_refresh_token()
+    await connection.insert_refresh_token(token_hash=new_hash,user_id=uid,expires_at=expires_at.isoformat(),created_at=created_at.isoformat())
+    set_auth_cookies(response,access_jwt,access_expire,raw,expires_at)
+    return {"message":"Successfully Changed Password"}
 

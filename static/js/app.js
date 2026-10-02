@@ -21,6 +21,7 @@
     pendingCounted: false,  // first pending map is already reflected in unread counts
     animate: new Set(),     // message_ids that just arrived live -- animated once, then cleared
     hiddenDms: {},          // { [chat_id]: last_message time_sent when it was hidden } -- see HIDDEN_DMS_KEY
+    typing: {},             // { [chat_id]: { [user_id]: expiry timer } } -- see "typing indicators"
   };
 
   /* People picker. One dialog (#newChatDialog) and one search pipeline serve two flows,
@@ -58,13 +59,13 @@
 
   const $ = (id) => document.getElementById(id);
   const els = {
-    meAvatar: $("meAvatar"), meName: $("meName"), logoutBtn: $("logoutBtn"),
+    meBtn: $("meBtn"), meAvatar: $("meAvatar"), meName: $("meName"), logoutBtn: $("logoutBtn"),
     newChatBtn: $("newChatBtn"), convList: $("convList"),
-    backBtn: $("backBtn"), chatHead: $("chatHead"), chatFace: $("chatFace"),
-    chatTitle: $("chatTitle"), chatSub: $("chatSub"),
+    backBtn: $("backBtn"), chatHead: $("chatHead"), chatInfoBtn: $("chatInfoBtn"),
+    chatFace: $("chatFace"), chatTitle: $("chatTitle"), chatSub: $("chatSub"),
     connBanner: $("connBanner"), messages: $("messages"), chatEmpty: $("chatEmpty"),
     composer: $("composer"), composerInput: $("composerInput"), sendBtn: $("sendBtn"),
-    sendingHint: $("sendingHint"), toast: $("toast"),
+    sendingHint: $("sendingHint"), toast: $("toast"), typingStatus: $("typingStatus"),
     newChatDialog: $("newChatDialog"), newChatForm: $("newChatForm"), newChatError: $("newChatError"),
     newChatTitle: $("newChatTitle"),
     pickerField: $("pickerField"), pickerInput: $("pickerInput"),
@@ -73,11 +74,20 @@
     newChatSubmit: $("newChatSubmit"),
     chatMenu: $("chatMenu"), chatMenuBtn: $("chatMenuBtn"), chatMenuList: $("chatMenuList"),
     menuMembers: $("menuMembers"), menuAddPeople: $("menuAddPeople"),
-    menuLeave: $("menuLeave"), menuDelete: $("menuDelete"),
+    menuRename: $("menuRename"), menuLeave: $("menuLeave"), menuDelete: $("menuDelete"),
+    renameDialog: $("renameDialog"), renameForm: $("renameForm"), renameInput: $("renameInput"),
+    renameError: $("renameError"), renameSubmit: $("renameSubmit"),
     membersDialog: $("membersDialog"), membersTitle: $("membersTitle"), memberList: $("memberList"),
     membersFace: $("membersFace"), membersSub: $("membersSub"),
     membersStatus: $("membersStatus"), membersError: $("membersError"),
     membersLeave: $("membersLeave"), membersAdd: $("membersAdd"), membersClose: $("membersClose"),
+    membersRename: $("membersRename"), membersDelete: $("membersDelete"),
+    profileDialog: $("profileDialog"), profileFace: $("profileFace"), profileName: $("profileName"),
+    profileHandle: $("profileHandle"), profileLogout: $("profileLogout"), profileClose: $("profileClose"),
+    profilePassword: $("profilePassword"),
+    passwordDialog: $("passwordDialog"), passwordForm: $("passwordForm"),
+    passwordError: $("passwordError"), passwordSubmit: $("passwordSubmit"),
+    pwOld: $("pwOld"), pwNew: $("pwNew"), pwConfirm: $("pwConfirm"),
     confirmDialog: $("confirmDialog"), confirmForm: $("confirmForm"), confirmTitle: $("confirmTitle"),
     confirmCopy: $("confirmCopy"), confirmError: $("confirmError"), confirmOk: $("confirmOk"),
   };
@@ -206,6 +216,12 @@
    *
    * `member_left` is self-initiated, so actor_id === target_id: it reads off the actor
    * alone ("You left" / "Cleo left") and never mentions a target.
+   *
+   * `member_kicked` is an admin removing someone else, so it has a real actor and target
+   * like the role events. We say "removed" rather than the server's "kicked" -- the
+   * fallback sentence in `message` is wording for a client that doesn't know the event,
+   * not wording we have to repeat -- which reads in all three persons: "You removed Cleo",
+   * "Ada removed you", "Ada removed Cleo".
    */
   function systemText(f) {
     if (!f) return "";
@@ -217,8 +233,16 @@
     switch (f.event) {
       case "member_added": return actor + " added " + target;
       case "member_left":  return actor + " left";
+      case "member_kicked": return actor + " removed " + target;
       case "promoted":     return actor + " made " + target + " an admin";
       case "demoted":      return actor + " removed " + target + " as an admin";
+      // A rename has no target user; its new name rides in `data` (messages.event_data),
+      // which is why this can say "You" where the server's fallback sentence can't.
+      case "chat_renamed": {
+        const name = (f.data && f.data.new_name) || "";
+        return name ? actor + " renamed the group to \u201c" + name + "\u201d"
+                    : actor + " renamed the group";
+      }
       default:             return String(f.message == null ? "" : f.message);
     }
   }
@@ -237,6 +261,186 @@
     const loaded = state.messagesByChat[chat.chat_id];
     const hit = loaded && loaded.find((m) => m.message_id === lm.message_id);
     return hit && hit.type === "system" ? hit : null;
+  }
+
+  /* ---------- typing indicators ----------
+   * Outbound: `WS.sendTyping()` is the only frame besides a message this client publishes,
+   * and every one of them is a Redis round-trip out to every other member of the chat --
+   * so it is throttled on the leading edge: the first keystroke of a burst announces at
+   * once, then at most one frame per TYPING_SEND_MS while the user keeps going. Never on
+   * an empty composer, never for a chat that isn't the open one, never while the socket
+   * is down.
+   *
+   * Inbound: `user_typing` carries only a chat and a user. There is NO "stopped typing"
+   * frame in the protocol, so nothing will ever tell us someone finished -- each typist
+   * gets a TYPING_TTL_MS timer that is reset by their next frame and otherwise expires
+   * them. TTL comfortably exceeds the sender's throttle, so an indicator stays up while
+   * someone is really typing and clears a few seconds after they stop.
+   *
+   * Frames arrive for chats that aren't open (we are registered for all of them), so the
+   * state is per-chat: the open chat draws a bubble at the end of its message list, every
+   * other chat renders "typing…" in place of its sidebar preview. A chat we don't know is
+   * ignored rather than remembered, so the map can't grow past the sidebar.
+   *
+   * The visible form differs between the two, but typingText() writes the copy for both: it
+   * is the sidebar's preview line AND the bubble's screen-reader equivalent (#typingStatus),
+   * because the bubble itself is three animated dots and says nothing out loud.
+   */
+  const TYPING_TTL_MS = 5000;        // how long one `user_typing` frame keeps the line up
+  const TYPING_SEND_MS = 3000;       // at most one outbound frame per chat per this long
+
+  // The last typing frame we sent, so the throttle knows when the next one is due.
+  const typingOut = { chatId: null, at: 0 };
+
+  function typingIds(chatId) {
+    const per = state.typing[chatId];
+    return per ? Object.keys(per).map(Number) : [];
+  }
+
+  /* "Ada is typing…" / "Ada and Cleo are typing…" / "Ada and 2 others are typing…".
+   * First names only -- this has to fit a sidebar row as well as the composer line. The
+   * map's keys are user ids, which JS enumerates in ascending numeric order, so the names
+   * keep their places instead of reshuffling every time a frame lands. */
+  function typingText(chat) {
+    if (!chat) return "";
+    const names = typingIds(chat.chat_id)
+      .map((id) => memberName(chat, id).split(/\s+/)[0] || "Someone");
+    if (!names.length) return "";
+    if (names.length === 1) return names[0] + " is typing…";
+    if (names.length === 2) return names[0] + " and " + names[1] + " are typing…";
+    return names[0] + " and " + (names.length - 1) + " others are typing…";
+  }
+
+  /* The indicator bubble for this chat, or null when nobody in it is typing.
+   *
+   * ONE bubble per chat however many people are typing -- a stack of per-person bubbles
+   * would push the conversation up the screen and turn a hint into an event. Up to
+   * STACK_MAX faces overlap inside it and the rest become "+N", the same shorthand the
+   * group header uses, so you can still tell who it is.
+   *
+   * `data-typists` is the ascending id list the bubble was built from: renderTyping()
+   * compares it and leaves an unchanged bubble in place, so the dots don't restart every
+   * time one of the typists re-announces (every TYPING_SEND_MS, per person).
+   *
+   * The row is `.msg.theirs` with both group classes, i.e. a standalone received bubble --
+   * never `.mine`, and never without them, or the corner radii would read as mid-run. */
+  function typingBubbleEl(chat) {
+    const ids = typingIds(chat.chat_id);
+    if (!ids.length) return null;
+    const members = chat.members || [];
+    const faces = el("span", { class: "typing-faces" });
+    for (const id of ids.slice(0, STACK_MAX)) {
+      const m = members.find((x) => x.user_id === id);
+      faces.append(avatarEl(memberName(chat, id), "user:" + id, m && m.avatar_url, "avatar-sm"));
+    }
+    const rest = ids.length - STACK_MAX;
+    if (rest > 0) faces.append(el("span", { class: "stack-more" }, "+" + rest));
+    return el("div", {
+      class: "msg theirs group-start group-end typing-msg",
+      id: "typingBubble",
+      "data-typists": ids.join(","),
+      "aria-hidden": "true",            // #typingStatus is the spoken copy
+    },
+      faces,
+      el("div", { class: "msg-col" },
+        el("div", { class: "bubble typing-bubble" },
+          el("span", { class: "typing-dots" }, el("i"), el("i"), el("i")))));
+  }
+
+  // renderMessages() wipes the list, so it puts the bubble back itself.
+  function appendTypingBubble(box, chat) {
+    const node = typingBubbleEl(chat);
+    if (node) box.append(node);
+  }
+
+  /* Between full renders this adds, swaps or removes the bubble in place -- and it owns the
+   * scroll anchoring that comes with growing or shrinking the list from the bottom, because
+   * the bubble now lives in the scroll container rather than over it. The rule is the one
+   * renderMessages() already follows for an incoming message: follow the bottom only if the
+   * reader was already there, otherwise don't touch scrollTop. Swapping one bubble for
+   * another needs no anchoring at all -- same row, same height.
+   *
+   * #typingStatus is a permanent live region whose text changes, rather than an element that
+   * appears and disappears, which is what makes the announcement reliable; it is only
+   * written when the sentence actually differs, so an unchanged state can't re-announce. */
+  function renderTyping() {
+    const chat = state.activeChatId ? findChat(state.activeChatId) : null;
+    const text = chat ? typingText(chat) : "";
+    if (els.typingStatus.textContent !== text) els.typingStatus.textContent = text;
+
+    const box = els.messages;
+    const existing = $("typingBubble");
+    const wanted = chat && !box.hidden ? typingBubbleEl(chat) : null;
+
+    if (!wanted) {
+      if (!existing) return;
+      const atBottom = nearBottom();
+      existing.remove();
+      if (atBottom) scrollToBottom();
+      return;
+    }
+    if (existing) {
+      if (existing.dataset.typists === wanted.dataset.typists) return;
+      existing.replaceWith(wanted);
+      return;
+    }
+    const atBottom = nearBottom();
+    box.append(wanted);
+    if (atBottom) scrollToBottom();
+  }
+
+  // Each of these reports whether it actually changed anything, so callers can skip a
+  // render on an expiry timer that had already been overtaken.
+  function clearTypist(chatId, userId) {
+    const per = state.typing[chatId];
+    if (!per || !Object.prototype.hasOwnProperty.call(per, userId)) return false;
+    clearTimeout(per[userId]);
+    delete per[userId];
+    if (!Object.keys(per).length) delete state.typing[chatId];
+    return true;
+  }
+
+  function clearTyping(chatId) {
+    const per = state.typing[chatId];
+    if (!per) return false;
+    for (const id of Object.keys(per)) clearTimeout(per[id]);
+    delete state.typing[chatId];
+    return true;
+  }
+
+  // Switching chats and losing the socket both invalidate every indicator at once.
+  function clearAllTyping() {
+    let any = false;
+    for (const id of Object.keys(state.typing)) any = clearTyping(id) || any;
+    typingOut.chatId = null;
+    typingOut.at = 0;
+    return any;
+  }
+
+  function noteTyping(chatId, userId) {
+    if (userId == null || !findChat(chatId)) return;          // unknown chat: nothing to show
+    if (state.me && userId === state.me.user_id) return;      // the server skips us; belt and braces
+    const per = state.typing[chatId] || (state.typing[chatId] = {});
+    clearTimeout(per[userId]);
+    per[userId] = setTimeout(() => {
+      if (!clearTypist(chatId, userId)) return;
+      renderTyping();
+      renderChatList();
+    }, TYPING_TTL_MS);
+    renderTyping();
+    renderChatList();
+  }
+
+  // Called on every keystroke; the throttle decides whether anything goes out.
+  function maybeSendTyping() {
+    const chatId = state.activeChatId;
+    if (!chatId || state.wsStatus !== "open") return;
+    if (!els.composerInput.value.trim()) return;              // nothing typed, nothing to announce
+    const now = Date.now();
+    if (typingOut.chatId === chatId && now - typingOut.at < TYPING_SEND_MS) return;
+    if (!WS.sendTyping(chatId)) return;
+    typingOut.chatId = chatId;
+    typingOut.at = now;
   }
 
   /* ---------- locally hidden DMs ----------
@@ -475,6 +679,11 @@
         time = fmtCoarse(d);
         timeTitle = fullStamp(d);
       }
+      /* Someone typing right now is newer than any last_message, so it wins the preview
+       * line -- including for a chat that isn't open, which is the only place a typing
+       * frame for a background chat is visible. The time stays put. */
+      const typing = typingText(chat);
+      if (typing) preview = typing;
       const unread = chat.unread_message_count > 0;
       list.append(el("button", {
         type: "button",
@@ -534,6 +743,15 @@
     els.messages.scrollTop = els.messages.scrollHeight;
   }
 
+  /* "Is the reader at the end of the conversation?" -- the one test behind every decision to
+   * follow new content down, whether that content is a message, an event line or the typing
+   * bubble. The slack absorbs sub-pixel scroll heights and the last line's leading. */
+  const BOTTOM_SLACK = 80;
+  function nearBottom() {
+    const box = els.messages;
+    return box.scrollHeight - box.scrollTop - box.clientHeight < BOTTOM_SLACK;
+  }
+
   /* One centred, full-width divider line -- no bubble, no avatar, no side -- so an event
    * can't be mistaken for something a person said. The time carries the same `title`
    * tooltip as a bubble's .meta stamp, built by the same fullStamp(). */
@@ -557,12 +775,13 @@
 
     const prevHeight = box.scrollHeight;
     const prevTop = box.scrollTop;
-    const wasAtBottom = prevHeight - prevTop - box.clientHeight < 80;
+    const wasAtBottom = nearBottom();
 
     box.replaceChildren();
 
     if (!msgs) {
       box.append(el("div", { class: "messages-note" }, "Loading…"));
+      if (chat) appendTypingBubble(box, chat);
       return;
     }
     if (state.hasMoreByChat[chatId] || state.loadingHistory[chatId]) {
@@ -629,6 +848,10 @@
     });
     state.animate.clear();
 
+    /* Last thing in the list, below the newest message -- and appended before the scroll
+     * decision below, so "bottom"/"stick" land past it instead of just above it. */
+    if (chat) appendTypingBubble(box, chat);
+
     if (mode === "prepend") {
       box.scrollTop = box.scrollHeight - prevHeight + prevTop;
     } else if (mode === "bottom" || wasAtBottom) {
@@ -670,11 +893,17 @@
     state.activeChatId = chatId;
     chat.unread_message_count = 0;
     unhideDm(chatId);              // deliberately opening a hidden DM brings it back
+    /* Every indicator is stale the moment the view changes: a line from the chat we just
+     * left must not survive the switch, and a frame that landed seconds ago shouldn't
+     * greet us in the new one. Whoever is still typing re-announces within TYPING_SEND_MS.
+     * This also resets the outbound throttle, so our first keystroke here announces. */
+    clearAllTyping();
     document.body.dataset.view = "chat";
     renderChatList();
     renderHeader(chat);
     showChatPane(true);
     renderMessages(chatId, "bottom");
+    renderTyping();
     updateComposer();
     if (DESKTOP.matches) els.composerInput.focus();
 
@@ -755,6 +984,7 @@
   function clearSelection() {
     state.activeChatId = null;
     showChatPane(false);                  // also clears the header and its menu
+    renderTyping();                       // no open chat -> no indicator
     updateComposer();
     if (!DESKTOP.matches) document.body.dataset.view = "list";
   }
@@ -770,10 +1000,12 @@
     delete state.hasMoreByChat[chatId];
     delete state.loadingHistory[chatId];
     delete state.liveBuffer[chatId];
+    clearTyping(chatId);                  // its timers would outlive the chat itself
     unhideDm(chatId);                     // gone for good; no point remembering it's hidden
     if (memberPanel.chatId === chatId && els.membersDialog.open) els.membersDialog.close();
     if (state.activeChatId === chatId) clearSelection();
     renderChatList();
+    renderTyping();
     return had;
   }
 
@@ -804,6 +1036,11 @@
     }
     els.composerInput.value = "";
     autoGrow();
+    /* The composer is empty again, so nothing more goes out until the user types -- and
+     * the next burst should announce immediately rather than waiting out the throttle
+     * window this send fell inside. */
+    typingOut.chatId = null;
+    typingOut.at = 0;
     state.sending++;
     updateComposer();
     armAckTimeout();
@@ -815,11 +1052,108 @@
     ta.style.height = Math.min(ta.scrollHeight, COMPOSER_MAX_HEIGHT) + "px";
   }
 
+  // Reachable from the sidebar foot's icon button and from the profile card; both are
+  // disabled so a second click can't fire while the request and the redirect are in flight.
   async function logout() {
     els.logoutBtn.disabled = true;
+    els.profileLogout.disabled = true;
     WS.stop();
     try { await API.logout(); } catch (_) { /* already logged out */ }
     location.replace("/login/");
+  }
+
+  /* ---------- your own profile ----------
+   * READ-ONLY, and not an oversight: POST /profile in app/routers/users.py is an unfinished
+   * stub -- it validates the body, assigns `display_name` and `avatar_url` to locals and
+   * then does nothing, with no DB write and no response. There is nothing to submit to, so
+   * this card shows what GET /me returned and offers the one action that does work (log
+   * out). Don't add an edit form, or an API.updateProfile(), until the endpoint exists.
+   */
+  function openProfile() {
+    if (!state.me) return;
+    const name = state.me.display_name || state.me.user;
+    els.profileFace.replaceChildren(
+      avatarEl(name, "user:" + state.me.user_id, state.me.avatar_url, "avatar-xl"));
+    els.profileName.textContent = name;
+    /* `user` is the username and `display_name` the shown name -- two different fields from
+     * GET /me, so the handle is worth its own line. It collapses (`.profile-handle:empty`)
+     * if /me ever answers without one. */
+    els.profileHandle.textContent = state.me.user ? "@" + state.me.user : "";
+    els.profileDialog.showModal();
+    els.profileClose.focus();          // never land on "Log out"
+  }
+
+  /* ---------- changing your own password ----------
+   * The one account edit with a working endpoint behind it, so it is the one thing the
+   * profile card can do rather than just show. It opens on top of the profile card, which
+   * stays underneath, the same way #renameDialog sits over the info panel.
+   *
+   * Nothing here is trimmed. Leading and trailing spaces are part of a password, and the
+   * server's rule rejects whitespace anywhere -- trimming would quietly turn a password the
+   * server refuses into a different one it accepts, and the user would then be unable to
+   * log in with what they typed.
+   */
+  function clearPasswordFields() {
+    els.pwOld.value = "";
+    els.pwNew.value = "";
+    els.pwConfirm.value = "";
+  }
+
+  function openPassword() {
+    els.passwordError.textContent = "";
+    clearPasswordFields();
+    els.passwordSubmit.disabled = false;
+    els.passwordDialog.showModal();
+    els.pwOld.focus();
+  }
+
+  async function submitPassword(ev) {
+    ev.preventDefault();
+    if (els.passwordSubmit.disabled) return;
+    const current = els.pwOld.value;
+    const next = els.pwNew.value;
+    const again = els.pwConfirm.value;
+
+    /* Checked in the order the user reads the form, so the message always points at the
+     * first field that needs attention -- and each one focuses it. The server would answer
+     * 422 for a missing field and 403 for the other two; none of that needs a round trip. */
+    if (!current) {
+      els.passwordError.textContent = "Enter your current password.";
+      els.pwOld.focus();
+      return;
+    }
+    if (!next || !again) {
+      els.passwordError.textContent = "Enter your new password twice.";
+      (next ? els.pwConfirm : els.pwNew).focus();
+      return;
+    }
+    if (!PW_RULE.test(next)) {
+      els.passwordError.textContent = PW_HINT;
+      els.pwNew.focus();
+      els.pwNew.select();
+      return;
+    }
+    if (next !== again) {
+      els.passwordError.textContent = "The new passwords don't match.";
+      els.pwConfirm.focus();
+      els.pwConfirm.select();
+      return;
+    }
+
+    els.passwordSubmit.disabled = true;
+    els.passwordError.textContent = "";
+    try {
+      await API.changePassword(current, next, again);
+      /* The session is untouched by this: the JWT keeps its 10h and the refresh token pair
+       * is not rotated or revoked, server-side or here. So we stay signed in and say
+       * nothing about other devices -- they stay signed in too. */
+      els.passwordDialog.close();        // the dialog's "close" handler wipes the fields
+      toast("Password changed");
+    } catch (e) {
+      if (e && e.redirected) return;     // session expired; apiFetch is already navigating
+      els.passwordError.textContent = friendly(e, "Couldn't change your password.");
+      els.passwordSubmit.disabled = false;
+    }
   }
 
   /* ---------- WebSocket events ---------- */
@@ -833,6 +1167,10 @@
           refreshChats();
         }
         state.everOpened = true;
+      } else {
+        /* Nothing will expire these for us while the socket is down, and whoever was
+         * typing may well have finished by the time it comes back. */
+        if (clearAllTyping()) { renderTyping(); renderChatList(); }
       }
       updateConnBanner();
       updateComposer();
@@ -842,13 +1180,42 @@
       const chat = findChat(m.chat_id);
       if (!chat) { refreshChats(); return; }
       unhideDm(m.chat_id);          // activity brings a locally hidden DM back into the list
+      clearTypist(m.chat_id, m.sender_id);   // they said it; they're done typing it
       if (storeIncoming(m.chat_id, [m]) > 0) state.animate.add(m.message_id);
       bumpLastMessage(chat, m);
       const mine = isMine(m);
       if (!mine && m.chat_id !== state.activeChatId) chat.unread_message_count = (chat.unread_message_count || 0) + 1;
       sortChats();
       renderChatList();
+      renderTyping();
       if (m.chat_id === state.activeChatId) renderMessages(m.chat_id, mine ? "bottom" : "stick");
+    });
+
+    /* ---- user_typing ----
+     * One frame per typist per throttle window, never echoed to the typist themselves, and
+     * with no "stopped" frame to follow it -- noteTyping() arms the expiry that stands in
+     * for one. A frame for a chat that isn't open still lands in state and shows up as
+     * that chat's sidebar preview. */
+    WS.on("user_typing", (f) => {
+      if (!f || !f.chat_id) return;
+      noteTyping(f.chat_id, f.user_id);
+    });
+
+    /* ---- chat_renamed ----
+     * Fanned out to every member of a chat whose name an admin changed (there is no rename
+     * UI in this client, but the frame still has to land somewhere or the old name sticks
+     * until the next GET /chats). The frame carries the new name, so patch it in place
+     * rather than refetching -- a refresh is only needed for a chat we don't have.
+     * A DM is never renamed server-side, and its title comes from the other person anyway. */
+    WS.on("chat_renamed", (f) => {
+      if (!f || !f.chat_id || typeof f.new_name !== "string") return;
+      const chat = findChat(f.chat_id);
+      if (!chat) { refreshChats(); return; }
+      if (chat.chat_name === f.new_name) return;
+      chat.chat_name = f.new_name;
+      renderChatList();
+      if (f.chat_id === state.activeChatId) renderHeader(chat);
+      if (memberPanel.chatId === f.chat_id) renderMembers();
     });
 
     /* ---- system (membership/role) frames ----
@@ -964,6 +1331,13 @@
     });
 
     WS.on("error", (e) => {
+      /* An error frame says nothing about which frame it answers, but the wording pins
+       * this one down: the server refuses a control frame for a chat the socket isn't
+       * registered for with exactly this detail, and `typing` is the only control frame we
+       * ever send (a refused message frame comes back with its own wording). A typing
+       * frame that didn't land is not worth telling the user about, and it must not be
+       * counted against a message still waiting for its ack. */
+      if (e && e.detail === "Something Went Wrong") return;
       if (state.sending > 0) state.sending--;
       if (state.sending === 0) clearTimeout(sendingTimer);
       updateComposer();
@@ -1312,6 +1686,7 @@
     const admin = amAdmin(chat);
     els.menuMembers.hidden = dm;                        // a DM's two people are in the header already
     els.menuAddPeople.hidden = dm || !admin;            // the server refuses both cases anyway
+    els.menuRename.hidden = dm || !admin;               // a DM's title comes from the other person
     els.menuLeave.hidden = dm;                          // any member can leave a group; nobody a DM
     els.menuDelete.hidden = !dm && !admin;              // only an admin can delete a group
     els.menuDelete.textContent = dm ? "Delete for me" : "Delete group";
@@ -1319,7 +1694,7 @@
   }
 
   function menuItems() {
-    return [els.menuMembers, els.menuAddPeople, els.menuLeave, els.menuDelete]
+    return [els.menuMembers, els.menuAddPeople, els.menuRename, els.menuLeave, els.menuDelete]
       .filter((b) => !b.hidden);
   }
 
@@ -1391,6 +1766,15 @@
   /* The server's 403 details are accurate but shouty, and the last-admin one is an
    * ordinary outcome rather than an error, so the ones a user can actually hit get
    * rewritten. Anything unmapped falls through to the detail text as-is. */
+  /* The server's password rule, copied verbatim from `rgx` in app/routers/users.py: at
+   * least 8 characters with a lowercase letter, an uppercase letter, a digit and a symbol,
+   * and no whitespace anywhere. Mirrored, not owned -- the server re-checks it, this only
+   * saves a round trip and lets the requirement be stated before you type. PW_HINT is the
+   * one wording for it, used by the hint line, the local failure and the server's own 403. */
+  const PW_RULE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d])[^\s]{8,}$/;
+  const PW_HINT = "Use at least 8 characters with an uppercase letter, a lowercase letter, " +
+    "a number and a symbol, and no spaces.";
+
   const FRIENDLY = {
     "There must be at least one admin in the chat!":
       "A group needs at least one admin. Make someone else an admin first.",
@@ -1399,6 +1783,18 @@
     "You can't delete a DM chat!": "Direct messages can't be deleted — hide it with “Delete for me” instead.",
     "You can't leave a DM chat!": "Direct messages can't be left — hide it with “Delete for me” instead.",
     "You can't add members to a DM!": "You can't add anyone to a direct message. Start a group instead.",
+    // Kicking: an admin can only remove a plain member, so the two refusals are "demote
+    // them first" and "you aren't an admin" -- both actionable, neither obvious from the
+    // server's wording, which talks about kicking "a user" and "an admin" instead.
+    "You can't kick an admin from the chat!": "Admins can't be removed. Demote them first, then remove them.",
+    "You can't kick a user from the chat!": "Only an admin can remove people from a group.",
+    "You can't kick someone from a DM chat!":
+      "There's nobody to remove from a direct message — hide it with “Delete for me” instead.",
+    /* The password endpoint's two refusals. "Missmatch" is the server's own spelling and the
+     * key has to match it byte for byte or the rewrite silently won't fire; both are
+     * normally caught locally first, so these are the backstop for a rule that drifts. */
+    "Password Missmatch": "The new passwords don't match.",
+    "Password does not meet the requirement": PW_HINT,
   };
   // The sole-admin 403 is shared by change_role and leave; leaving needs its own wording,
   // because "make someone else an admin" is the literal next step rather than a policy note.
@@ -1428,14 +1824,19 @@
 
   function hideDmLocally(chat) {
     hideDm(chat);
+    // The chat still exists server-side, so dropChat() is wrong here -- but the info panel
+    // is about a conversation that just left the list, so close it if it is the one showing.
+    if (memberPanel.chatId === chat.chat_id && els.membersDialog.open) els.membersDialog.close();
     if (state.activeChatId === chat.chat_id) clearSelection();
     renderChatList();
     toast("Hidden on this device");
     return null;
   }
 
-  function askDelete() {
-    const chat = findChat(state.activeChatId);
+  // `chat` is passed when the info panel asks (its chat is the one on screen, not necessarily
+  // the selected one by the time the confirmation resolves); the kebab omits it.
+  function askDelete(chat) {
+    chat = chat || findChat(state.activeChatId);
     if (!chat) return;
     const title = chatTitle(chat);
     if (isDm(chat)) {
@@ -1488,6 +1889,52 @@
     }
   }
 
+  /* ---- rename a group ----
+   * The new name is never applied here: a 200 only means it committed, and the
+   * `chat_renamed` frame is what moves the sidebar, header and panel -- same rule as a
+   * message, which renders on the echo rather than optimistically. So every open client,
+   * this one included, updates from one place. */
+  let renaming = null;
+
+  function openRename(chat) {
+    const target = chat || findChat(state.activeChatId);
+    if (!target || isDm(target) || !amAdmin(target)) return;
+    renaming = target.chat_id;
+    els.renameError.textContent = "";
+    els.renameInput.value = target.chat_name || "";
+    els.renameSubmit.disabled = false;
+    els.renameDialog.showModal();
+    els.renameInput.focus();
+    els.renameInput.select();
+  }
+
+  async function submitRename(ev) {
+    ev.preventDefault();
+    if (els.renameSubmit.disabled) return;
+    const chat = findChat(renaming);
+    if (!chat) { els.renameDialog.close(); return; }
+    // The server takes any string, "" included, which would blank the group's name.
+    const name = els.renameInput.value.trim();
+    if (!name) {
+      els.renameError.textContent = "Give the group a name.";
+      els.renameInput.focus();
+      return;
+    }
+    if (name === chat.chat_name) { els.renameDialog.close(); return; }   // nothing to do
+    els.renameSubmit.disabled = true;
+    els.renameError.textContent = "";
+    try {
+      await API.renameChat(chat.chat_id, name);
+      els.renameDialog.close();
+    } catch (e) {
+      if (e && e.redirected) return;
+      els.renameError.textContent = friendly(e) || "Couldn't rename the group.";
+      els.renameSubmit.disabled = false;
+      // A 403 usually means our copy of the roster or our own role is stale.
+      if (e && e.status === 403) refreshChats();
+    }
+  }
+
   function askLeave(chat) {
     const target = chat || findChat(state.activeChatId);
     if (!target || isDm(target)) return;
@@ -1502,27 +1949,38 @@
     openConfirm({ title: "Leave this group?", copy, okLabel: "Leave group", onOk: () => leaveGroup(target) });
   }
 
-  /* ---------- group details: members, roles, membership ----------
+  /* ---------- conversation info: members, roles, membership ----------
+   * One panel for both kinds of conversation, reached two ways: the kebab's "Members &
+   * roles" and the header's identity block. The names here still say `members` -- the panel
+   * grew into the DM case rather than being replaced, and renaming nine ids plus every
+   * reference would be churn with no behaviour behind it.
+   *
    * There is no members endpoint: GET /chats is the only source of `role` and of the
    * roster itself, so every successful change_role / add_member / leave is followed by
    * refreshChats(), which calls renderMembers() again while this panel is open.
    *
-   * The roster is grouped by role instead of tagging every row, which is what made the
-   * old flat list noisy: with "Admins" and "Members" as headings, a row only has to say
-   * who it is. The actions are deliberately unequal -- "Make admin" is an outlined chip
+   * A GROUP gets the roster grouped by role instead of a tag on every row, which is what
+   * made the old flat list noisy: with "Admins" and "Members" as headings, a row only has to
+   * say who it is. The actions are deliberately unequal -- "Make admin" is an outlined chip
    * you reach for, while "Demote"/"Step down" is quiet text that only turns red under the
-   * cursor -- so the significant action no longer looks like the benign one.
+   * cursor -- so the significant action no longer looks like the benign one. An admin also
+   * gets "Rename" in the head, beside the name it changes.
+   *
+   * A DM gets the same frame with everything role-shaped removed, because a DM has no admin
+   * (both members are role "user") and the server refuses to rename, delete or leave one:
+   * one flat two-person list, no row actions, no Add people, no Leave, and "Delete for me"
+   * as the only destructive action -- which is a purely local hide, not a server call.
    */
   function openMembers() {
     const chat = findChat(state.activeChatId);
-    if (!chat || isDm(chat)) return;
+    if (!chat) return;
     memberPanel.chatId = chat.chat_id;
     memberPanel.busy = null;
     els.membersError.textContent = "";
     renderMembers();
     if (!els.membersDialog.open) els.membersDialog.showModal();
     // Land focus on something non-destructive: the primary action if there is one,
-    // otherwise Close. Never the Leave button, which <dialog> would pick on its own.
+    // otherwise Close. Never Leave or Delete, which <dialog> would pick on its own.
     (els.membersAdd.hidden ? els.membersClose : els.membersAdd).focus();
   }
 
@@ -1534,13 +1992,13 @@
     /* Every admin row keeps its control even when this client thinks it is the last admin
      * (our roles can be stale, and the server is the judge): the confirmation says so up
      * front instead, and the 403 is rewritten if it still lands. */
-    let action = null;
+    const actions = [];
     if (iAmAdmin) {
       // The visible label is short by design, so the accessible name says who it is about.
       const label = self && isAdminRow ? "Step down as admin"
         : isAdminRow ? "Demote " + name + " to member"
           : "Make " + name + " an admin";
-      action = el("button", {
+      actions.push(el("button", {
         type: "button",
         class: "row-action" + (isAdminRow ? " caution" : ""),
         "aria-label": label,
@@ -1548,22 +2006,38 @@
         onclick: () => (self && isAdminRow
           ? askStepDown(chat, m)
           : applyRole(m.user_id, isAdminRow ? "user" : "admin")),
-      }, saving ? "Saving…" : self && isAdminRow ? "Step down" : isAdminRow ? "Demote" : "Make admin");
+      }, saving ? "Saving…" : self && isAdminRow ? "Step down" : isAdminRow ? "Demote" : "Make admin"));
+    }
+    /* "Remove" exactly where the server will accept it: an admin, in a group, on a plain
+     * member who isn't you. The backend refuses an admin target (demote them first) and
+     * has no self-kick, so your own row keeps "Leave group" in the footer as the way out.
+     * Quiet .caution weight, never the outlined one -- removing somebody must not read
+     * like the benign "Make admin" beside it. */
+    if (iAmAdmin && !isAdminRow && !self && !isDm(chat)) {
+      actions.push(el("button", {
+        type: "button",
+        class: "row-action caution",
+        "aria-label": "Remove " + name + " from this group",
+        disabled: memberPanel.busy !== null,
+        onclick: () => askRemoveMember(chat, m),
+      }, "Remove"));
     }
     return el("li", { class: "roster-row" + (saving ? " saving" : "") },
       avatarEl(name, "user:" + m.user_id, m.avatar_url),
       el("span", { class: "roster-main" },
         el("span", { class: "roster-name" }, name),
         self ? el("span", { class: "roster-you" }, "You") : null),
-      action);
+      actions.length ? el("span", { class: "roster-actions" }, actions) : null);
   }
 
+  // `caption` is null for a DM: two people with no roles between them need no heading, and
+  // "Members 2" over a list of exactly you and them reads like a group.
   function rosterGroup(chat, caption, people, iAmAdmin) {
     if (!people.length) return null;
     return el("section", { class: "roster-group" },
-      el("h3", { class: "roster-cap" },
+      caption ? el("h3", { class: "roster-cap" },
         el("span", null, caption),
-        el("span", { class: "roster-count" }, String(people.length))),
+        el("span", { class: "roster-count" }, String(people.length))) : null,
       el("ul", { class: "roster-list", role: "list" },
         people.map((m) => memberRow(chat, m, iAmAdmin))));
   }
@@ -1578,31 +2052,56 @@
       els.membersStatus.textContent = "This conversation is no longer available.";
       els.membersAdd.hidden = true;
       els.membersLeave.hidden = true;
+      els.membersRename.hidden = true;
+      els.membersDelete.hidden = true;
       return;
     }
 
     const title = chatTitle(chat);
+    const dm = isDm(chat);
     const members = (chat.members || []).slice();
     const admins = adminCount(chat);
     const iAmAdmin = amAdmin(chat);
+    const byName = (a, b) =>
+      String(a.display_name || "").localeCompare(String(b.display_name || ""));
 
     els.membersTitle.textContent = title;
-    els.membersFace.append(avatarEl(title, chatAvatarSeed(chat), null, "avatar-lg"));
+    // A DM's avatar is hued by the other person, like its sidebar row and header, and can
+    // carry their picture; a group's tile is hued by chat_id and has no image.
+    const other = dm ? otherMember(chat) : null;
+    els.membersFace.append(
+      avatarEl(title, chatAvatarSeed(chat), other && other.avatar_url, "avatar-lg"));
+    els.memberList.setAttribute("aria-busy", memberPanel.busy !== null ? "true" : "false");
+
+    if (dm) {
+      els.membersSub.textContent = "Direct message";
+      els.membersStatus.textContent =
+        "Just the two of you. A direct message has no admin, can't be renamed, and can't be " +
+        "deleted for both of you — “Delete for me” only clears it from this browser.";
+      els.membersAdd.hidden = true;        // the server refuses add_member on a DM
+      els.membersLeave.hidden = true;      // ...and leave, and delete_chat
+      els.membersRename.hidden = true;     // ...and rename
+      els.membersDelete.hidden = false;    // the local hide is the only thing left
+      // No role sections and no row actions: memberRow() draws none once iAmAdmin is false.
+      const flat = rosterGroup(chat, null, members.sort(byName), false);
+      els.memberList.append(flat || el("p", { class: "roster-empty" }, "Nobody is in this conversation."));
+      return;
+    }
+
     els.membersSub.textContent =
       members.length + (members.length === 1 ? " member" : " members") +
       " · " + admins + (admins === 1 ? " admin" : " admins");
     els.membersStatus.textContent = iAmAdmin
       ? (admins === 1
         ? "You're the only admin. Make someone else one before you step down or leave."
-        : "You're an admin: you can add people and change who else is an admin.")
-      : "Only an admin can add people or change roles.";
+        : "You're an admin: you can add or remove people and change who else is an admin.")
+      : "Only an admin can add or remove people, or change roles.";
     els.membersAdd.hidden = !iAmAdmin;
     els.membersLeave.hidden = false;
-    els.memberList.setAttribute("aria-busy", memberPanel.busy !== null ? "true" : "false");
+    els.membersRename.hidden = !iAmAdmin;  // same gate the endpoint enforces
+    els.membersDelete.hidden = true;        // a group is deleted from the kebab, for everyone
 
     // By name inside each group; the groups themselves put the people who can act first.
-    const byName = (a, b) =>
-      String(a.display_name || "").localeCompare(String(b.display_name || ""));
     const groups = [
       rosterGroup(chat, "Admins", members.filter((m) => m.role === "admin").sort(byName), iAmAdmin),
       rosterGroup(chat, "Members", members.filter((m) => m.role !== "admin").sort(byName), iAmAdmin),
@@ -1629,6 +2128,60 @@
       okLabel: "Step down",
       onOk: () => applyRole(member.user_id, "user"),
     });
+  }
+
+  /* ---------- removing a member ----------
+   * POST /chat/{chat_id}/kick is admin-only and plain-member-only, so the button is only
+   * drawn where it can succeed (see memberRow) -- but roles here are only ever as fresh as
+   * the last GET /chats, so the server is still the judge and its 403s are rewritten
+   * through FRIENDLY if one lands anyway.
+   *
+   * It is the one row action that does something irreversible to somebody else, so it goes
+   * through the shared confirmation like "Step down" and "Leave group", opening on top of
+   * the panel, which stays underneath.
+   *
+   * Nothing is drawn locally: the kicked member gets a `member_removed` frame (the
+   * existing handler drops the chat for them) and everyone still in the chat gets a
+   * `member_kicked` system frame that puts the event line in the timeline. We get neither,
+   * so the refresh below is what updates our own roster.
+   */
+  function askRemoveMember(chat, member) {
+    const name = member.display_name || "this person";
+    openConfirm({
+      title: "Remove " + name + "?",
+      copy: name + " leaves “" + chatTitle(chat) + "” and stops receiving its messages. " +
+        "Everyone in the group sees that you removed them, and an admin can add them back.",
+      okLabel: "Remove",
+      onOk: () => kickMember(chat, member),
+    });
+  }
+
+  // Returns null on success, or the message to show — same contract as applyRole().
+  async function kickMember(chat, member) {
+    if (memberPanel.busy !== null) return null;
+    memberPanel.busy = member.user_id;
+    els.membersError.textContent = "";
+    renderMembers();
+    const name = member.display_name || "They";
+    try {
+      await API.kickMember(chat.chat_id, member.user_id);
+      memberPanel.busy = null;
+      await refreshChats();            // the only source of the roster; re-renders this panel
+      toast(name + " was removed");
+      return null;
+    } catch (e) {
+      memberPanel.busy = null;
+      if (e && e.redirected) return null;
+      // 404 "User not found in this chat": they are already out and our roster was behind.
+      if (e && e.status === 404) {
+        await refreshChats();
+        return null;
+      }
+      const problem = friendly(e, "Couldn't remove them from this group.");
+      els.membersError.textContent = problem;
+      renderMembers();
+      return problem;
+    }
   }
 
   // Returns null on success, or the message to show — so openConfirm() can use it too.
@@ -1661,7 +2214,17 @@
     });
     els.backBtn.addEventListener("click", () => { document.body.dataset.view = "list"; });
     els.logoutBtn.addEventListener("click", logout);
+    els.meBtn.addEventListener("click", openProfile);
+    els.profileLogout.addEventListener("click", logout);
+    els.profilePassword.addEventListener("click", openPassword);
+    els.passwordForm.addEventListener("submit", submitPassword);
+    /* Cancel, Esc and a successful change all end up here, so the typed password never
+     * outlives the dialog in the DOM. */
+    els.passwordDialog.addEventListener("close", clearPasswordFields);
     els.newChatBtn.addEventListener("click", openNewChat);
+    /* A second way into the info card, beside the kebab's "Members & roles" -- and the only
+     * way in for a DM, which has no menu item for it. The kebab is untouched. */
+    els.chatInfoBtn.addEventListener("click", openMembers);
     els.newChatForm.addEventListener("submit", submitPicker);
     // Every dialog's Cancel/Close button just closes its own dialog; per-dialog "close"
     // listeners below do the tidying up, so Esc and the button behave identically.
@@ -1691,12 +2254,17 @@
     });
     els.menuMembers.addEventListener("click", () => { closeChatMenu(); openMembers(); });
     els.menuAddPeople.addEventListener("click", () => { closeChatMenu(); openAddPeople(); });
+    els.menuRename.addEventListener("click", () => { closeChatMenu(); openRename(); });
+    els.renameForm.addEventListener("submit", submitRename);
     els.menuLeave.addEventListener("click", () => { closeChatMenu(); askLeave(); });
     els.menuDelete.addEventListener("click", () => { closeChatMenu(); askDelete(); });
 
-    // Both panel actions open a second dialog on top of this one, which stays put.
+    // Every panel action opens a second dialog on top of this one, which stays put.
     els.membersAdd.addEventListener("click", () => openAddPeople(findChat(memberPanel.chatId)));
     els.membersLeave.addEventListener("click", () => askLeave(findChat(memberPanel.chatId)));
+    els.membersRename.addEventListener("click", () => openRename(findChat(memberPanel.chatId)));
+    // DM-only: the local hide, never a server delete -- the server refuses to delete a DM.
+    els.membersDelete.addEventListener("click", () => askDelete(findChat(memberPanel.chatId)));
     els.membersDialog.addEventListener("close", () => { memberPanel.chatId = null; memberPanel.busy = null; });
     els.confirmForm.addEventListener("submit", submitConfirm);
     els.confirmDialog.addEventListener("close", () => {
@@ -1734,7 +2302,11 @@
       if (!ev.target.closest(".chip-x")) els.pickerInput.focus();
     });
 
-    els.composerInput.addEventListener("input", () => { autoGrow(); updateComposer(); });
+    els.composerInput.addEventListener("input", () => {
+      autoGrow();
+      updateComposer();
+      maybeSendTyping();        // throttled to one frame every TYPING_SEND_MS, not per keystroke
+    });
     els.composerInput.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
         ev.preventDefault();

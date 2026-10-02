@@ -146,6 +146,22 @@ button, input, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 ::selection { background: var(--accent-haze); }
 
+/* Text that exists only for a screen reader: the spoken half of something drawn as pure
+ * decoration (the typing dots) or the purpose of a control whose visible label is its
+ * content (the header's identity block, your own row in the sidebar foot). Kept in the
+ * accessibility tree, so `display: none` is not an option. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* timestamps: tabular figures so columns of times don't jitter */
 .conv-time, .meta, .day, .sys-time { font-variant-numeric: tabular-nums; }
 
@@ -180,6 +196,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .avatar-sm { width: 28px; height: 28px; font-size: 11px; }
 .avatar-xs { width: 20px; height: 20px; font-size: 9px; }
 .avatar-lg { width: 44px; height: 44px; font-size: 15px; }
+.avatar-xl { width: 68px; height: 68px; font-size: 23px; }
 
 .icon-btn {
   display: inline-flex;
@@ -334,6 +351,25 @@ button, input, textarea { font: inherit; color: inherit; }
   border-top: 1px solid var(--line);
   flex-shrink: 0;
 }
+/* Your avatar + name opens the profile card, so it is a button; it has to look like the
+ * quiet row it replaced rather than a button, hence no border and a hover fill only. */
+.me-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  margin-left: -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.me-btn:hover { background: var(--row-hover); }
 .me-name {
   flex: 1;
   min-width: 0;
@@ -367,6 +403,29 @@ button, input, textarea { font: inherit; color: inherit; }
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
+/* The identity block (avatar + name + subtitle) is one control that opens the conversation
+ * info card. The <h1> is only a wrapper -- it keeps the pane's heading while the <button>
+ * inside it takes the click -- so it carries no type of its own. On desktop the negative
+ * margin pulls the button's padding back out so the avatar stays where it was; on mobile
+ * that is dropped, because the back button is in that space. */
+.chat-head-id { flex: 1 1 auto; min-width: 0; margin: 0; font: inherit; }
+.chat-id-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin-left: -8px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.chat-id-btn:hover { background: var(--row-hover); }
 .chat-head-text { display: flex; flex-direction: column; min-width: 0; gap: 0; }
 .chat-title {
   margin: 0;
@@ -712,6 +771,38 @@ button, input, textarea { font: inherit; color: inherit; }
   color: var(--ink-soft);
 }
 
+/* ---------- typing indicator ----------
+ * A received bubble at the end of the message list: the same .msg.theirs + .bubble shape a
+ * message gets (so it reads as "something is arriving" rather than as chrome), with the
+ * typist's face beside it. It is deliberately NOT in .composer any more -- the old line was
+ * pulled out of flow there because .composer's offsetHeight feeds --composer-h through a
+ * ResizeObserver and anything in flow would shift the whole conversation. Living inside
+ * #messages sidesteps that entirely: the composer's height never changes, and the list's
+ * own scroll anchoring (app.js's renderTyping/nearBottom) decides whether appearing or
+ * disappearing follows the bottom -- exactly as a new message does.
+ *
+ * One bubble per chat, no matter how many people are typing: up to three overlapping faces
+ * and then "+N", reusing the header's .stack-more. The dots are decoration; #typingStatus
+ * carries the sentence for a screen reader.
+ */
+.typing-msg { align-items: flex-end; gap: 8px; animation: msgIn 120ms ease-out; }
+.typing-faces { display: inline-flex; align-items: center; flex-shrink: 0; margin-bottom: 1px; }
+.typing-faces .avatar { box-shadow: 0 0 0 2px var(--paper); }
+.typing-faces .avatar + .avatar,
+.typing-faces .stack-more { margin-left: -8px; }
+.typing-bubble { padding: 10px 13px; line-height: 0; }
+
+.typing-dots { display: inline-flex; align-items: center; flex-shrink: 0; gap: 4px; }
+.typing-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-soft);
+  animation: typingPulse 1.1s ease-in-out infinite;
+}
+.typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+
 /* ---------- toast ---------- */
 .toast {
   position: fixed;
@@ -750,7 +841,10 @@ button, input, textarea { font: inherit; color: inherit; }
   letter-spacing: -0.025em;
 }
 .dialog label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 500; color: var(--ink); }
-.dialog input[type="text"] {
+/* text and password share one field style -- an unlisted type gets no styling at all, which
+ * is how the password fields in #passwordDialog would otherwise render as browser defaults. */
+.dialog input[type="text"],
+.dialog input[type="password"] {
   padding: 8px 10px;
   border: 1px solid var(--input-border);
   border-radius: 7px;
@@ -760,8 +854,10 @@ button, input, textarea { font: inherit; color: inherit; }
   outline: none;
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
-.dialog input[type="text"]::placeholder { color: var(--ink-faint); }
-.dialog input[type="text"]:focus {
+.dialog input[type="text"]::placeholder,
+.dialog input[type="password"]::placeholder { color: var(--ink-faint); }
+.dialog input[type="text"]:focus,
+.dialog input[type="password"]:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-haze);
 }
@@ -902,6 +998,9 @@ button, input, textarea { font: inherit; color: inherit; }
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
 }
+/* "Rename" sits in the head, next to the name it changes, rather than competing with the
+ * footer's Leave/Close/Add — it is an edit to the thing above it, not an exit. */
+.panel-head .row-action { align-self: center; }
 
 /* one quiet inset line about what you can do here, instead of a tag on every row */
 .panel-note {
@@ -990,6 +1089,11 @@ button, input, textarea { font: inherit; color: inherit; }
   background: var(--row-hover);
   color: var(--error);
 }
+/* A plain member's row can carry two actions ("Make admin" and "Remove"), so they travel
+ * together in one group pinned right. Several `margin-left: auto` siblings would each
+ * claim a share of the row's free space and drift apart. */
+.roster-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.roster-actions .row-action { margin-left: 0; }
 
 /* Footer: Leave sits apart on the left, Close + Add people on the right. */
 .panel-actions {
@@ -1002,6 +1106,22 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 .actions-spacer { flex: 1 1 auto; }
 
+/* ---------- profile card (#profileDialog) ----------
+ * Read-only by design (POST /profile is a backend stub), so it is a centred identity block
+ * with nothing to fill in: avatar, display name, @username. */
+.profile-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 0 2px;
+  text-align: center;
+}
+.profile-face { display: inline-flex; margin-bottom: 10px; }
+.profile-card h2 { max-width: 100%; overflow-wrap: anywhere; }
+.profile-handle { margin: 0; font-size: 13px; color: var(--ink-soft); }
+.profile-handle:empty { display: none; }
+
 /* ---------- motion ---------- */
 @keyframes msgIn    { from { opacity: 0; transform: translateY(3px); } }
 @keyframes bannerIn { from { opacity: 0; transform: translate(-50%, -4px); } }
@@ -1009,6 +1129,9 @@ button, input, textarea { font: inherit; color: inherit; }
 @keyframes fadeIn   { from { opacity: 0; } }
 @keyframes msgSend  { from { opacity: 0; transform: translateY(6px) scale(0.94); } }
 @keyframes sendReady { from { transform: scale(0.6); } }
+/* The dots only ever dim; with reduced motion the animation is cut to nothing and they
+ * settle at their natural full opacity, which still reads as an indicator. */
+@keyframes typingPulse { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -1032,6 +1155,8 @@ button, input, textarea { font: inherit; color: inherit; }
   .sys { gap: 9px; }
   .sys-text { max-width: none; }               /* the column is already narrow enough */
   .composer { padding-left: 16px; padding-right: 16px; }
+  /* The back button owns the space the identity block's padding would reach into. */
+  .chat-id-btn { margin-left: 0; padding-left: 4px; padding-right: 4px; }
 }
 
 /* The group panel's three footer buttons don't fit one narrow row. */

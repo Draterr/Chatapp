@@ -1,19 +1,25 @@
-/* ws.js — WebSocket connection, reconnect, inbound frame routing, sendMessage().
+/* ws.js — WebSocket connection, reconnect, inbound frame routing, sendMessage/sendTyping().
  *
  * The socket is NOT proxied by nginx; it connects straight to the backend port.
  * Auth is the httpOnly session cookie, sent automatically on the handshake.
  *
- * Inbound frames (nine shapes; see FRONTEND_SPEC.md §5):
+ * Inbound frames (eleven shapes; see FRONTEND_SPEC.md §5):
  *   { type: "message", ... }                     -> "message"
  *   { type: "system", event, actor_*, target_* }  -> "system"
  *   { type: "ack", content, timestamp }          -> "ack"
  *   { type: "error", code, detail }               -> "error"
  *   { type: "chat_created", chat_id }             -> "chat_created"
  *   { type: "chat_deleted", chat_id }             -> "chat_deleted"
+ *   { type: "chat_renamed", chat_id, new_name }   -> "chat_renamed"
  *   { type: "member_added", chat_id, user_id }    -> "member_added"
  *   { type: "member_removed", chat_id, user_id }  -> "member_removed"
+ *   { type: "user_typing", chat_id, user_id }     -> "user_typing"
  *   { [chat_id]: [frames...] }                   -> "pending"  (no top-level type)
  * Plus a synthetic "status" event: "connecting" | "open" | "closed".
+ *
+ * Outbound, this client only ever publishes two things: a message, and a typing frame
+ * (see sendTyping). Every other change -- membership, roles, renames, deletes -- is a
+ * REST call; the server answers a client control frame it doesn't allow with an error.
  *
  * A "system" frame is a membership/role event (member_added / member_left / promoted /
  * demoted) recorded in the chat's timeline. It travels the chat's own pubsub channel like
@@ -23,6 +29,10 @@
  * The two membership frames are sent ONLY to the user they are about -- the rest of the
  * chat is never told -- so "member_added" means *you* were added and "member_removed"
  * means *you* are out. app.js explains what that costs.
+ *
+ * A "user_typing" frame goes to every member of the chat EXCEPT the typist, and there is
+ * no "stopped typing" frame to match it: the receiver expires the indicator on a timer
+ * (app.js). A frame can arrive for a chat that isn't open.
  */
 window.WS = (() => {
   "use strict";
@@ -64,8 +74,10 @@ window.WS = (() => {
       case "error":   emit("error", data); break;
       case "chat_created": emit("chat_created", data); break;
       case "chat_deleted": emit("chat_deleted", data); break;
+      case "chat_renamed": emit("chat_renamed", data); break;
       case "member_added":   emit("member_added", data); break;
       case "member_removed": emit("member_removed", data); break;
+      case "user_typing":    emit("user_typing", data); break;
       default:
         // Pending-messages map: keyed by chat_id, no top-level "type".
         if (data.type === undefined) emit("pending", data);
@@ -148,5 +160,20 @@ window.WS = (() => {
     return true;
   }
 
-  return { connect, reconnect, stop, on, isOpen, sendMessage, url: WS_URL };
+  /* The only thing besides a message this client is allowed to publish. Note the shape:
+   * `type` is "control" and `action` is what names it -- "typing" is the server's entire
+   * allow-set, and anything else comes back as an error frame and is discarded. No
+   * `user_id` is sent: the server always uses the session's and ignores a frame that
+   * claims otherwise. Each frame is a Redis round-trip out to every other member, so the
+   * caller throttles (app.js sends at most one every few seconds while typing).
+   *
+   * There is no "stopped typing" counterpart to send -- the receiving client expires its
+   * own indicator -- so there is nothing to call when the user stops. */
+  function sendTyping(chatId) {
+    if (!isOpen() || !chatId) return false;
+    socket.send(JSON.stringify({ type: "control", action: "typing", chat_id: chatId }));
+    return true;
+  }
+
+  return { connect, reconnect, stop, on, isOpen, sendMessage, sendTyping, url: WS_URL };
 })();

@@ -3,7 +3,6 @@ import json
 from loguru import logger
 from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from db import connection
 from routers.users import verify_jwt
@@ -11,19 +10,6 @@ from routers.websocket import manager
 
 chats = APIRouter()
 
-async def announce(chat_id:str,*,actor_id:int,event:str,target_id:int):
-    """Write a membership/role event into the chat and fan it out to live sockets.
-
-    Never allowed to fail the request that caused it: the membership change itself is
-    already committed by this point, so a broken announcement is cosmetic and must not
-    turn a successful action into a 500.
-    """
-    try:
-        frame = await connection.insert_system_message(chat_id=chat_id,actor_id=actor_id,
-                                                      event=event,target_id=target_id)
-        await manager.pubsub_instance.publish_message(chat_id,json.dumps(frame))
-    except Exception:
-        logger.exception(f"failed to announce {event} in {chat_id}")
 
 class CHAT(BaseModel):
     chat_name: str
@@ -32,6 +18,25 @@ class CHAT(BaseModel):
 
 class ChatId(BaseModel):
     chat_id: str
+
+
+async def announce(chat_id:str,*,actor_id:int,event:str,target_id:int|None=None,data:dict|None=None):
+    """Write a system event into the chat and fan it out to live sockets.
+
+    Never allowed to fail the request that caused it: the change itself is already
+    committed by this point, so a broken announcement is cosmetic and must not turn a
+    successful action into a 500. `target_id` is None for an event with no subject user
+    and `data` carries that event's own payload instead (a rename's new name).
+
+    Both are keyword-only with defaults so a bad call can't raise a TypeError at the call
+    site, outside this try -- which is exactly how the rename announcement used to 500.
+    """
+    try:
+        frame = await connection.insert_system_message(chat_id=chat_id,actor_id=actor_id,
+                                                      event=event,target_id=target_id,data=data)
+        await manager.pubsub_instance.publish_message(chat_id,json.dumps(frame))
+    except Exception:
+        logger.exception(f"failed to announce {event} in {chat_id}")
 
 @chats.post("/create_chat",tags=["chats"])
 async def create_chat(chat: CHAT, session: Annotated[dict|None, Depends(verify_jwt)]):
@@ -112,6 +117,57 @@ async def leave_chat(session: Annotated[dict|None , Depends(verify_jwt)],chat_id
         await manager.pubsub_instance.publish_message("control",json.dumps({"type":"remove_member","chat_id":str(chat_id),"user_id":uid}))
         return {"message":"Left the chat successfully"}
 
+@chats.post("/chat/{chat_id}/kick",tags=["chats"])
+async def kick_user(session: Annotated[dict|None , Depends(verify_jwt)],chat_id:str,user_id:int):
+    if session is None:
+        raise HTTPException(status_code=401,detail="Unauthorized")
+    uid = session["user_id"]
+    existing_chat = await connection.get_chats(uid)
+    if chat_id not in existing_chat:
+        raise HTTPException(status_code=403,detail="You are not a member of this chat!")
+
+    chat_info = await connection.get_chat_info(chat_id)
+    if chat_info["is_dm"]:
+        raise HTTPException(status_code=403,detail="You can't kick someone from a DM chat!")
+
+    user_role = await connection.check_user_role(chat_id=chat_id,user_id=uid)
+    kick_role = await connection.check_user_role(chat_id=chat_id,user_id=user_id)
+    if user_role == "user" and kick_role == "admin":
+        raise HTTPException(status_code=403,detail="You can't kick an admin from the chat!")
+    if user_role == "user" and kick_role == "user":
+        raise HTTPException(status_code=403,detail="You can't kick a user from the chat!")
+    if user_role == "admin" and kick_role == "admin":
+        raise HTTPException(status_code=403,detail="You can't kick an admin from the chat!")
+
+    status = await connection.leave_chat(chat_id=chat_id,user_id=user_id)
+    if status:
+        await announce(chat_id,actor_id=uid,event="member_kicked",target_id=user_id)
+        await manager.pubsub_instance.publish_message("control",json.dumps({"type":"remove_member","chat_id":str(chat_id),"user_id":user_id}))
+        return {"message":"User kicked from the chat successfully"}
+
+@chats.post("/chat/{chat_id}/rename",tags=["chats"])
+async def rename_chat(session: Annotated[dict|None , Depends(verify_jwt)],chat_id:str, new_name:str):
+    if session is None:
+        raise HTTPException(status_code=401,detail="Unauthorized")
+    uid = session["user_id"]
+    existing_chat = await connection.get_chats(uid)
+    if chat_id not in existing_chat:
+        raise HTTPException(status_code=403,detail="You are not a member of this chat!")
+
+    chat_info = await connection.get_chat_info(chat_id)
+    if chat_info["is_dm"]:
+        raise HTTPException(status_code=403,detail="You can't rename a DM chat!")
+
+    user_role = await connection.check_user_role(chat_id=chat_id,user_id=uid)
+    if user_role != "admin":
+        raise HTTPException(status_code=403,detail="You are not an admin of this chat!")
+
+    status = await connection.rename_chat(chat_id=chat_id,new_name=new_name)
+    if status:
+        await announce(chat_id,actor_id=uid,event="chat_renamed",data={"new_name":new_name})
+        await manager.pubsub_instance.publish_message("control",json.dumps({"type":"rename_channel","chat_id":str(chat_id),"new_name":new_name}))
+        return {"message":"Chat renamed successfully"}
+
 @chats.post("/chat/{chat_id}/add_member",tags=["chats"])
 async def add_member(session: Annotated[dict|None , Depends(verify_jwt)],chat_id:str,user_id:list[int]):
     if session is None:
@@ -167,3 +223,22 @@ async def change_role(session: Annotated[dict|None , Depends(verify_jwt)],chat_i
     await connection.change_role(chat_id=chat_id,user_id=user_id,new_role=new_role)
     await announce(chat_id,actor_id=uid,event="promoted" if new_role == "admin" else "demoted",target_id=user_id)
     return {"message":"Role changed successfully"}
+
+# @chats.post("/edit/edit_message",tags=["chats"])
+# async def edit_message(self,*,session: Annotated[dict|None, Depends(verify_jwt)],chat_id:str,message_id: str,new_content:str):
+#     if session is None:
+#         raise HTTPException(status_code=401,detail="Unauthorized")
+#     uid = session["user_id"]
+#
+#     #check if the user is a member of the chat
+#     existing_chat = await connection.get_chats(uid)
+#     if chat_id not in existing_chat:
+#         raise HTTPException(status_code=403,detail="You are not a member of this chat!")
+#
+#     message_owner = await connection.check_message_ownership(message_id=message_id)
+#     if message_owner != uid:
+#         raise HTTPException(status_code=403,detail="You do not own this message!")
+#     
+#     await connection.edit_message(message_id=message_id,new_content=new_content)
+#     await announce(chat_id=chat_id,actor_id=uid,event="edit_message")
+#

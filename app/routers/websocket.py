@@ -35,6 +35,8 @@ class ErrorResponse(BaseModel):
     code:str
     detail: str 
 
+CLIENT_CONTROL_ACTIONS = {"typing"}
+
 class WebsocketManager:
     def __init__(self):
         self.active_connections = {}
@@ -92,7 +94,7 @@ class WebsocketManager:
             await connection.set_delivery_status([message_id],receiver_id)
 
     async def _handle_control(self,content:dict):
-        control_frame_list = ["create_channel","delete_channel","add_member","remove_member"]
+        control_frame_list = ["create_channel","delete_channel","add_member","remove_member","rename_channel","edit_message",*CLIENT_CONTROL_ACTIONS]
         if content["type"] not in control_frame_list:
             logger.warning(f"unknown control frame: {content}")
             return
@@ -152,6 +154,32 @@ class WebsocketManager:
                 await websocket.send_text(notify)         # tell the client to refetch /chats
             except Exception:
                 return
+        
+        elif content["type"] == "rename_channel":
+            notify = json.dumps({"type":"chat_renamed","chat_id":chat_id,"new_name":content["new_name"]})
+            members = self.chats.get(chat_id)
+            if not members:
+                return                                  # no local sockets for this chat -> ignore
+            for user_id,websocket in list(members):
+                try:
+                    await websocket.send_text(notify)     # tell the client to refetch /chats
+                except Exception:
+                    continue
+
+        elif content["type"] == "typing":
+            user_id = content["user_id"]
+            notify = json.dumps({"type":"user_typing","chat_id":chat_id,"user_id":user_id})
+            members = self.chats.get(chat_id,[])
+            if not members:
+                return
+            for cur_id,websocket in members:
+                if cur_id == user_id:
+                    continue
+                try:
+                    await websocket.send_text(notify)
+                except Exception:
+                    continue
+
 
     async def send_message(self,message:str,chat_id:str):
         await self.pubsub_instance.publish_message(chat_id,message)
@@ -259,17 +287,58 @@ async def deliver_pending_messages(messages:tuple,receiver_id:int):
     await connection.set_delivery_status(message_ids,receiver_id)
 
 
-async def send_message(username:str,client_id:str,websocket:WebSocket):
+async def _reject(websocket:WebSocket,code:str,detail:str):
+    """Tell the client a frame was refused, tolerating a socket that just died."""
+    try:
+        await websocket.send_json(jsonable_encoder(ErrorResponse(type="error",code=code,detail=detail)))
+    except Exception:
+        pass                                       # already gone; receive_json will raise next
+
+async def send_message(username:str,client_id:int,websocket:WebSocket):
     while True:
-        data = await websocket.receive_json()
+        # receive_json() raises on a disconnect or on a non-JSON text frame; a disconnect
+        # has to reach the endpoint so its `finally` can deregister the socket, while bad
+        # JSON is the client's problem and must not end the loop.
+        try:
+            data = await websocket.receive_json()
+        except WebSocketDisconnect:
+            raise
+        except json.JSONDecodeError:
+            await _reject(websocket,"400","Malformed frame: expected JSON")
+            continue
         logger.info(f"{client_id} said {data}")
-        type = data["type"]
-        message = data["message"]
-        chat_id = data["chat_id"]
-        if type == "message":
-            await user_send_message(username,client_id,chat_id,message)
-        else:
-            await websocket.send_json(jsonable_encoder(ErrorResponse(type="error",code="unsupported_message_type",detail="the type is unsupported")))
+        # Everything from here on is driven by client input, so one malformed frame may
+        # only skip itself. Letting it out of the loop leaves the socket open but unread:
+        # the client keeps seeing a live connection while nothing it sends is handled.
+        try:
+            if not isinstance(data,dict):
+                await _reject(websocket,"400","Malformed frame: expected an object")
+                continue
+            type = data.get("type")
+            if type == "message":
+                message = data.get("message")
+                chat_id = data.get("chat_id")
+                if not isinstance(message,str) or not isinstance(chat_id,str):
+                    await _reject(websocket,"400","A message frame needs string `message` and `chat_id`")
+                    continue
+                await user_send_message(username,client_id,chat_id,message)
+            elif type == "control":
+                action = data.get("action")
+                if action not in CLIENT_CONTROL_ACTIONS:
+                    await _reject(websocket,"404","anything but typing frame must be done with api")
+                    continue
+                if (client_id, websocket) not in manager.chats.get(data.get("chat_id"),[]):
+                    await _reject(websocket,"400","Something Went Wrong")
+                    continue
+                msg = {"type":action,"chat_id":data["chat_id"],"user_id":client_id}
+                await manager.pubsub_instance.publish_message("control",json.dumps(msg))
+            else:
+                await _reject(websocket,"415","Unsupported Message Type")
+        except WebSocketDisconnect:
+            raise                                  # the socket is gone; let the endpoint clean up
+        except Exception:
+            logger.exception(f"dropping bad frame from {client_id}: {data}")
+            await _reject(websocket,"500","Could not handle that frame")
 
 @wsroute.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket,session: Annotated[dict|None, Depends(verify_jwt)]):

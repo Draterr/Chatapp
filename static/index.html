@@ -28,8 +28,13 @@
       <div class="conv-list" id="convList" role="list"></div>
 
       <footer class="sidebar-foot">
-        <span class="avatar avatar-sm" id="meAvatar" aria-hidden="true"></span>
-        <span class="me-name" id="meName"></span>
+        <!-- Your own avatar + name is the way into the (read-only) profile card; the icon
+             button beside it still logs out in one click. -->
+        <button class="me-btn" id="meBtn" type="button" aria-haspopup="dialog">
+          <span class="avatar avatar-sm" id="meAvatar" aria-hidden="true"></span>
+          <span class="me-name" id="meName"></span>
+          <span class="sr-only">Your profile</span>
+        </button>
         <button class="icon-btn" id="logoutBtn" type="button" title="Log out" aria-label="Log out">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg>
         </button>
@@ -42,11 +47,22 @@
         <button class="icon-btn back-btn" id="backBtn" type="button" title="Back" aria-label="Back to conversations">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
         </button>
-        <span class="chat-face" id="chatFace" aria-hidden="true"></span>
-        <span class="chat-head-text">
-          <h1 class="chat-title" id="chatTitle"></h1>
-          <span class="chat-sub" id="chatSub"></span>
-        </span>
+        <!-- The avatar + name + subtitle is a control: it opens the conversation info card
+             (#membersDialog, which serves DMs as well as groups). The <button> lives inside
+             the <h1> rather than the other way round, because a heading is flow content and
+             would not be valid inside a button — this way the pane keeps its heading and the
+             whole identity block is still one activatable target. The kebab beside it is
+             unchanged and remains the full menu. -->
+        <h1 class="chat-head-id">
+          <button class="chat-id-btn" id="chatInfoBtn" type="button" aria-haspopup="dialog">
+            <span class="chat-face" id="chatFace" aria-hidden="true"></span>
+            <span class="chat-head-text">
+              <span class="chat-title" id="chatTitle"></span>
+              <span class="chat-sub" id="chatSub"></span>
+            </span>
+            <span class="sr-only">Conversation info</span>
+          </button>
+        </h1>
 
         <!-- Conversation menu. Items are shown/hidden per chat by renderChatMenu(). -->
         <div class="chat-menu" id="chatMenu" hidden>
@@ -57,6 +73,7 @@
           <div class="menu" id="chatMenuList" role="menu" aria-labelledby="chatMenuBtn" hidden>
             <button class="menu-item" id="menuMembers" type="button" role="menuitem">Members &amp; roles</button>
             <button class="menu-item" id="menuAddPeople" type="button" role="menuitem">Add people</button>
+            <button class="menu-item" id="menuRename" type="button" role="menuitem">Rename group</button>
             <button class="menu-item" id="menuLeave" type="button" role="menuitem">Leave group</button>
             <button class="menu-item danger" id="menuDelete" type="button" role="menuitem">Delete group</button>
           </div>
@@ -73,6 +90,13 @@
         <h2 class="stage-title">No conversation selected</h2>
         <p class="stage-copy">Choose one from the list, or start a new conversation.</p>
       </div>
+
+      <!-- The typing indicator is a bubble at the end of #messages, built by app.js. The
+           dots are decoration (aria-hidden), so this live region is the spoken half of it:
+           it carries the same "Ada is typing…" sentence typingText() writes for a sidebar
+           row, and it is a permanent element whose text changes rather than one that comes
+           and goes, which is what makes an announcement reliable. -->
+      <p class="sr-only" id="typingStatus" role="status"></p>
 
       <div class="messages" id="messages" hidden></div>
 
@@ -121,11 +145,18 @@
     </form>
   </dialog>
 
-  <!-- Group details: who is in the conversation, who runs it, and the actions that change
-       that. Roles and membership come from GET /api/chats (there is no members endpoint),
-       so every successful change_role / add_member / leave is followed by a chats refresh.
-       renderMembers() fills the head, the roster and the footer; roster rows are grouped
-       by role, so no row needs to repeat its own role badge. -->
+  <!-- Conversation info: who is in it, who runs it, and the actions that change that. It is
+       reached from the kebab's "Members & roles" AND from the header's identity block, and it
+       serves a DM as well as a group — the ids keep their original `members*` names because
+       the panel grew into the DM case rather than being replaced.
+       Roles and membership come from GET /api/chats (there is no members endpoint), so every
+       successful change_role / add_member / leave is followed by a chats refresh.
+       renderMembers() fills the head, the roster and the footer; group roster rows are
+       grouped by role, so no row needs to repeat its own role badge, while a DM gets one
+       flat two-person list with no row actions (there is no admin in a DM).
+       Footer per case: a group shows Leave / Close / Add people (+ Rename in the head for an
+       admin); a DM shows only Delete for me / Close, because the server refuses to delete or
+       leave a DM and "Delete for me" is a purely local hide. -->
   <dialog class="dialog panel" id="membersDialog" aria-labelledby="membersTitle" aria-describedby="membersSub">
     <form id="membersForm" method="dialog">
       <header class="panel-head">
@@ -134,6 +165,8 @@
           <h2 id="membersTitle">Members</h2>
           <p class="panel-sub" id="membersSub"></p>
         </span>
+        <!-- Admin-only, group-only; opens #renameDialog on top of this panel. -->
+        <button type="button" class="row-action" id="membersRename" aria-label="Rename group" hidden>Rename</button>
       </header>
 
       <p class="panel-note" id="membersStatus" role="status"></p>
@@ -143,9 +176,82 @@
       <div class="form-error" id="membersError" role="alert"></div>
       <div class="dialog-actions panel-actions">
         <button type="button" class="btn quiet caution" id="membersLeave">Leave group</button>
+        <button type="button" class="btn quiet caution" id="membersDelete" hidden>Delete for me</button>
         <span class="actions-spacer" aria-hidden="true"></span>
         <button type="button" class="btn ghost" id="membersClose" data-close>Close</button>
         <button type="button" class="btn primary" id="membersAdd">Add people</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Your own profile. READ-ONLY on purpose: POST /profile in app/routers/users.py is an
+       unfinished stub (it validates the body, assigns two locals and returns nothing), so
+       there is no endpoint behind an edit form. Don't add one here before the backend one
+       exists. -->
+  <dialog class="dialog" id="profileDialog" aria-labelledby="profileName">
+    <form id="profileForm" method="dialog">
+      <div class="profile-card">
+        <span class="profile-face" id="profileFace" aria-hidden="true"></span>
+        <h2 id="profileName"></h2>
+        <p class="profile-handle" id="profileHandle"></p>
+      </div>
+      <p class="panel-note">This is how you appear to everyone else. Your name and picture
+        can't be changed yet — your password can.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn quiet caution" id="profileLogout">Log out</button>
+        <span class="actions-spacer" aria-hidden="true"></span>
+        <button type="button" class="btn ghost" id="profileClose" data-close>Close</button>
+        <button type="button" class="btn primary" id="profilePassword">Change password</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Change your own password (POST /passwordchange), opened from the profile card and
+       stacked on top of it like #renameDialog over the info panel. The rules mirrored in
+       app.js's PW_RULE are the server's, so a bad password costs no round trip; the server
+       re-checks both of them regardless. Nothing here is trimmed: whitespace is part of a
+       password, and the server's rule rejects it anywhere.
+       "Current password" is asked for because the server's model requires the field (a
+       missing one is a 422) -- but the handler does NOT verify its value today, so no copy
+       here may claim it was checked. -->
+  <dialog class="dialog" id="passwordDialog" aria-labelledby="passwordTitle">
+    <form id="passwordForm" method="dialog">
+      <h2 id="passwordTitle">Change password</h2>
+      <label>
+        <span>Current password</span>
+        <input type="password" id="pwOld" autocomplete="current-password" />
+      </label>
+      <label>
+        <span>New password</span>
+        <input type="password" id="pwNew" autocomplete="new-password" aria-describedby="pwRule" />
+      </label>
+      <p class="dialog-copy" id="pwRule">At least 8 characters, with an uppercase letter, a
+        lowercase letter, a number and a symbol — and no spaces.</p>
+      <label>
+        <span>Confirm new password</span>
+        <input type="password" id="pwConfirm" autocomplete="new-password" />
+      </label>
+      <div class="form-error" id="passwordError" role="alert"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancel</button>
+        <button type="submit" class="btn primary" id="passwordSubmit">Change password</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Rename a group. Admin-only and group-only; the new name is applied by the
+       chat_renamed frame, never locally, so every open client moves together. -->
+  <dialog class="dialog" id="renameDialog" aria-labelledby="renameTitle">
+    <form id="renameForm" method="dialog">
+      <h2 id="renameTitle">Rename group</h2>
+      <label class="group-name">
+        <span>Group name</span>
+        <input type="text" id="renameInput" maxlength="255" placeholder="What's this about?" />
+      </label>
+      <div class="form-error" id="renameError" role="alert"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" data-close>Cancel</button>
+        <button type="submit" class="btn primary" id="renameSubmit">Rename</button>
       </div>
     </form>
   </dialog>
